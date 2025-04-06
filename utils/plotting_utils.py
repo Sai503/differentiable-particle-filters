@@ -235,7 +235,7 @@ def plot_maze(maze='nav01', margin=1, means=None, stds=None, figure_name=None, s
 
 
 def plot_trajectories(data, figure_name=None, show=False, pause=False, emphasize=None, odom=False, mincolor=0.0, linewidth=0.3):
-    from methods.odom import OdometryBaseline
+    from methods_OLD.odom import OdometryBaseline
     if figure_name is not None:
         plt.figure(figure_name)
     for i, trajectories in enumerate(data['s']):
@@ -269,7 +269,7 @@ def plot_trajectories(data, figure_name=None, show=False, pause=False, emphasize
 
 
 def plot_trajectory(data, figure_name=None, show=False, pause=False, emphasize=None, odom=False, mincolor=0.0, linewidth=0.3):
-    from methods.odom import OdometryBaseline
+    from methods_OLD.odom import OdometryBaseline
     if figure_name is not None:
         plt.figure(figure_name)
     for i, trajectories in enumerate(data['s']):

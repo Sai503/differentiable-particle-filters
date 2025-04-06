@@ -1,12 +1,12 @@
 import tensorflow as tf
 import pickle
-from methods.dpf import DPF
-from methods.rnn import RNN
+from methods_OLD.dpf import DPF
+from methods_OLD.rnn import RNN
 from utils.data_utils import load_data, noisyfy_data, make_batch_iterator, reduce_data
 from utils.exp_utils import get_default_hyperparams
 from utils.method_utils import compute_sq_distance
 from utils.plotting_utils import plot_maze, plot_observations
-from methods.odom import OdometryBaseline
+from methods_OLD.odom import OdometryBaseline
 import numpy as np
 import matplotlib.pyplot as plt
 # from mpl_toolkits.axes_grid1 import make_axes_locatable

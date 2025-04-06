@@ -23,7 +23,7 @@ def run_cross_validation(i):
     data['weights'] = weights
 
     # reset tensorflow graph
-    tf.reset_default_graph()
+    tf.compat.v1.reset_default_graph()
 
     # instantiate method
     hyperparams = get_default_hyperparams()
@@ -31,7 +31,7 @@ def run_cross_validation(i):
 
     method = DPF(**hyperparams['global'])
 
-    with tf.Session() as session:
+    with tf.compat.v1.Session() as session:
         # train method and save result in model_path
         method.fit(session, data, model_path, plot=False, **hyperparams['train'])
 

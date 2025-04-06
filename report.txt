@@ -1,0 +1,184 @@
+TensorFlow 2.0 Upgrade Script
+-----------------------------
+Converted 5 files
+Detected 9 issues that require attention
+--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+File: methods/dpf.py
+--------------------------------------------------------------------------------
+methods/dpf.py:496:24: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+methods/dpf.py:502:20: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+--------------------------------------------------------------------------------
+File: methods/dpf_kitti.py
+--------------------------------------------------------------------------------
+methods/dpf_kitti.py:115:66: WARNING: tf.get_variable requires manual check. tf.get_variable returns ResourceVariables by default in 2.0, which have well-defined semantics and are stricter about shapes. You can disable this behavior by passing use_resource=False, or by calling tf.compat.v1.disable_resource_variables().
+methods/dpf_kitti.py:116:66: WARNING: tf.get_variable requires manual check. tf.get_variable returns ResourceVariables by default in 2.0, which have well-defined semantics and are stricter about shapes. You can disable this behavior by passing use_resource=False, or by calling tf.compat.v1.disable_resource_variables().
+methods/dpf_kitti.py:512:16: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+methods/dpf_kitti.py:557:24: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+methods/dpf_kitti.py:563:20: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+--------------------------------------------------------------------------------
+File: methods/rnn.py
+--------------------------------------------------------------------------------
+methods/rnn.py:123:20: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+methods/rnn.py:129:16: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+================================================================================
+Detailed log follows:
+
+================================================================================
+================================================================================
+Input tree: 'methods/'
+================================================================================
+--------------------------------------------------------------------------------
+Processing file 'methods/dpf.py'
+ outputting to 'methods_v2/dpf.py'
+--------------------------------------------------------------------------------
+
+43:34: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+44:34: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+45:34: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+46:46: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+47:42: INFO: Renamed 'tf.placeholder_with_default' to 'tf.compat.v1.placeholder_with_default'
+50:29: INFO: Changed tf.to_int32 call to tf.cast(..., dtype=tf.int32).
+69:22: INFO: Changing keep_prob arg of tf.nn.dropout to rate, and recomputing value.
+
+97:26: INFO: Changing keep_prob arg of tf.nn.dropout to rate, and recomputing value.
+
+169:23: INFO: Renamed 'tf.random_normal' to 'tf.random.normal'
+178:47: INFO: Renamed keyword argument for tf.reduce_mean from keep_dims to keepdims
+227:24: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+228:35: INFO: Renamed 'tf.get_collection' to 'tf.compat.v1.get_collection'
+228:53: INFO: Renamed 'tf.GraphKeys' to 'tf.compat.v1.GraphKeys'
+251:47: INFO: Renamed 'tf.log' to 'tf.math.log'
+252:20: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+253:31: INFO: Renamed 'tf.get_collection' to 'tf.compat.v1.get_collection'
+253:49: INFO: Renamed 'tf.GraphKeys' to 'tf.compat.v1.GraphKeys'
+271:26: INFO: Renamed 'tf.diag_part' to 'tf.linalg.tensor_diag_part'
+272:52: INFO: Renamed 'tf.diag' to 'tf.linalg.tensor_diag'
+272:60: INFO: Renamed 'tf.diag_part' to 'tf.linalg.tensor_diag_part'
+273:57: INFO: Renamed 'tf.log' to 'tf.math.log'
+274:59: INFO: Renamed 'tf.log' to 'tf.math.log'
+275:20: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+276:31: INFO: Renamed 'tf.get_collection' to 'tf.compat.v1.get_collection'
+276:49: INFO: Renamed 'tf.GraphKeys' to 'tf.compat.v1.GraphKeys'
+300:53: INFO: Renamed 'tf.log' to 'tf.math.log'
+301:24: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+302:35: INFO: Renamed 'tf.get_collection' to 'tf.compat.v1.get_collection'
+302:53: INFO: Renamed 'tf.GraphKeys' to 'tf.compat.v1.GraphKeys'
+322:40: INFO: Renamed 'tf.log' to 'tf.math.log'
+329:20: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+359:19: INFO: Renamed 'tf.global_variables_initializer' to 'tf.compat.v1.global_variables_initializer'
+365:19: INFO: Renamed 'tf.get_collection' to 'tf.compat.v1.get_collection'
+365:37: INFO: Renamed 'tf.GraphKeys' to 'tf.compat.v1.GraphKeys'
+380:16: INFO: Renamed 'tf.train.Saver' to 'tf.compat.v1.train.Saver'
+417:15: INFO: Renamed 'tf.global_variables_initializer' to 'tf.compat.v1.global_variables_initializer'
+425:16: INFO: Renamed 'tf.train.Saver' to 'tf.compat.v1.train.Saver'
+496:24: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+502:20: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+565:21: INFO: Renamed 'tf.random_uniform' to 'tf.random.uniform'
+598:32: INFO: Renamed 'tf.random_uniform' to 'tf.random.uniform'
+602:79: INFO: Renamed keyword argument for tf.argmax from dimension to axis
+631:141: INFO: Renamed keyword argument for tf.reduce_sum from keep_dims to keepdims
+632:140: INFO: Renamed keyword argument for tf.reduce_sum from keep_dims to keepdims
+637:68: INFO: Renamed keyword argument for tf.reduce_sum from keep_dims to keepdims
+651:98: INFO: Added keywords to args of function 'tf.while_loop'
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Processing file 'methods/__init__.py'
+ outputting to 'methods_v2/__init__.py'
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Processing file 'methods/odom.py'
+ outputting to 'methods_v2/odom.py'
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Processing file 'methods/dpf_kitti.py'
+ outputting to 'methods_v2/dpf_kitti.py'
+--------------------------------------------------------------------------------
+
+46:34: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+47:34: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+48:34: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+49:46: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+50:42: INFO: Renamed 'tf.placeholder_with_default' to 'tf.compat.v1.placeholder_with_default'
+51:44: INFO: Renamed 'tf.placeholder_with_default' to 'tf.compat.v1.placeholder_with_default'
+54:29: INFO: Changed tf.to_int32 call to tf.cast(..., dtype=tf.int32).
+73:22: INFO: Changing keep_prob arg of tf.nn.dropout to rate, and recomputing value.
+
+104:26: INFO: Changing keep_prob arg of tf.nn.dropout to rate, and recomputing value.
+
+115:66: WARNING: tf.get_variable requires manual check. tf.get_variable returns ResourceVariables by default in 2.0, which have well-defined semantics and are stricter about shapes. You can disable this behavior by passing use_resource=False, or by calling tf.compat.v1.disable_resource_variables().
+115:66: INFO: Renamed 'tf.get_variable' to 'tf.compat.v1.get_variable'
+116:66: WARNING: tf.get_variable requires manual check. tf.get_variable returns ResourceVariables by default in 2.0, which have well-defined semantics and are stricter about shapes. You can disable this behavior by passing use_resource=False, or by calling tf.compat.v1.disable_resource_variables().
+116:66: INFO: Renamed 'tf.get_variable' to 'tf.compat.v1.get_variable'
+129:18: INFO: Changing keep_prob arg of tf.nn.dropout to rate, and recomputing value.
+
+203:27: INFO: Renamed 'tf.random_normal' to 'tf.random.normal'
+204:29: INFO: Renamed 'tf.random_normal' to 'tf.random.normal'
+227:27: INFO: Renamed 'tf.random_normal' to 'tf.random.normal'
+229:58: INFO: Renamed keyword argument for tf.reduce_mean from keep_dims to keepdims
+263:24: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+287:51: INFO: Renamed 'tf.log' to 'tf.math.log'
+288:24: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+308:51: INFO: Renamed 'tf.log' to 'tf.math.log'
+309:24: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+327:26: INFO: Renamed 'tf.diag_part' to 'tf.linalg.tensor_diag_part'
+328:52: INFO: Renamed 'tf.diag' to 'tf.linalg.tensor_diag'
+328:60: INFO: Renamed 'tf.diag_part' to 'tf.linalg.tensor_diag_part'
+329:57: INFO: Renamed 'tf.log' to 'tf.math.log'
+330:59: INFO: Renamed 'tf.log' to 'tf.math.log'
+331:20: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+355:53: INFO: Renamed 'tf.log' to 'tf.math.log'
+356:24: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+377:40: INFO: Renamed 'tf.log' to 'tf.math.log'
+390:20: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+420:19: INFO: Renamed 'tf.global_variables_initializer' to 'tf.compat.v1.global_variables_initializer'
+424:19: INFO: Renamed 'tf.get_collection' to 'tf.compat.v1.get_collection'
+424:37: INFO: Renamed 'tf.GraphKeys' to 'tf.compat.v1.GraphKeys'
+435:16: INFO: Renamed 'tf.train.Saver' to 'tf.compat.v1.train.Saver'
+472:15: INFO: Renamed 'tf.global_variables_initializer' to 'tf.compat.v1.global_variables_initializer'
+480:16: INFO: Renamed 'tf.train.Saver' to 'tf.compat.v1.train.Saver'
+512:16: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+557:24: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+563:20: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+623:21: INFO: Renamed 'tf.random_uniform' to 'tf.random.uniform'
+656:32: INFO: Renamed 'tf.random_uniform' to 'tf.random.uniform'
+660:79: INFO: Renamed keyword argument for tf.argmax from dimension to axis
+693:141: INFO: Renamed keyword argument for tf.reduce_sum from keep_dims to keepdims
+694:140: INFO: Renamed keyword argument for tf.reduce_sum from keep_dims to keepdims
+699:68: INFO: Renamed keyword argument for tf.reduce_sum from keep_dims to keepdims
+713:98: INFO: Added keywords to args of function 'tf.while_loop'
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Processing file 'methods/rnn.py'
+ outputting to 'methods_v2/rnn.py'
+--------------------------------------------------------------------------------
+
+10:34: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+11:26: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+12:26: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+13:34: INFO: Renamed 'tf.placeholder' to 'tf.compat.v1.placeholder'
+23:22: INFO: Changing keep_prob arg of tf.nn.dropout to rate, and recomputing value.
+
+70:20: INFO: Renamed 'tf.train.AdamOptimizer' to 'tf.compat.v1.train.AdamOptimizer'
+75:15: INFO: Renamed 'tf.global_variables_initializer' to 'tf.compat.v1.global_variables_initializer'
+83:16: INFO: Renamed 'tf.train.Saver' to 'tf.compat.v1.train.Saver'
+123:20: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+129:16: WARNING: *.save requires manual check. (This warning is only applicable if the code saves a tf.Keras model) Keras model.save now saves to the Tensorflow SavedModel format by default, instead of HDF5. To continue saving to HDF5, add the argument save_format='h5' to the save() function.
+194:43: INFO: Renamed 'tf.nn.dynamic_rnn' to 'tf.compat.v1.nn.dynamic_rnn'
+195:43: INFO: Renamed 'tf.nn.dynamic_rnn' to 'tf.compat.v1.nn.dynamic_rnn'
+221:19: INFO: Renamed 'tf.global_variables_initializer' to 'tf.compat.v1.global_variables_initializer'
+225:19: INFO: Renamed 'tf.get_collection' to 'tf.compat.v1.get_collection'
+225:37: INFO: Renamed 'tf.GraphKeys' to 'tf.compat.v1.GraphKeys'
+230:16: INFO: Renamed 'tf.train.Saver' to 'tf.compat.v1.train.Saver'
+--------------------------------------------------------------------------------
+

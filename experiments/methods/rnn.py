@@ -7,10 +7,10 @@ from utils.method_utils import compute_sq_distance
 class RNN():
     def __init__(self, init_with_true_state=False, model='2lstm', **unused_kwargs):
 
-        self.placeholders = {'o': tf.placeholder('float32', [None, None, 24, 24, 3], 'observations'),
-                     'a': tf.placeholder('float32', [None, None, 3], 'actions'),
-                     's': tf.placeholder('float32', [None, None, 3], 'states'),
-                     'keep_prob': tf.placeholder('float32')}
+        self.placeholders = {'o': tf.compat.v1.placeholder('float32', [None, None, 24, 24, 3], 'observations'),
+                     'a': tf.compat.v1.placeholder('float32', [None, None, 3], 'actions'),
+                     's': tf.compat.v1.placeholder('float32', [None, None, 3], 'states'),
+                     'keep_prob': tf.compat.v1.placeholder('float32')}
         self.pred_states = None
         self.init_with_true_state = init_with_true_state
         self.model = model
@@ -20,7 +20,7 @@ class RNN():
         self.encoder = snt.Sequential([
             snt.nets.ConvNet2D([16, 32, 64], [[3, 3]], [2], [snt.SAME], activate_final=True, name='encoder/convnet'),
             snt.BatchFlatten(),
-            lambda x: tf.nn.dropout(x, self.placeholders['keep_prob']),
+            lambda x: tf.nn.dropout(x, rate=1 - (self.placeholders['keep_prob'])),
             snt.Linear(128, name='encoder/Linear'),
             tf.nn.relu,
         ])
@@ -67,12 +67,12 @@ class RNN():
         losses = {'mse': tf.reduce_mean(sq_dist),
                   'mse_last': tf.reduce_mean(sq_dist[:, -1])}
 
-        optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
+        optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
         gradients = optimizer.compute_gradients(losses['mse'])
         # clipped_gradients = [(tf.clip_by_value(grad, -1., 1.), var) for grad, var in gradients]
         train_op = optimizer.apply_gradients(gradients)
 
-        init = tf.global_variables_initializer()
+        init = tf.compat.v1.global_variables_initializer()
         sess.run(init)
 
         # save statistics and prepare saving variables
@@ -80,7 +80,7 @@ class RNN():
             os.makedirs(model_path)
         np.savez(os.path.join(model_path, 'statistics'), means=means, stds=stds, state_step_sizes=state_step_sizes,
                  state_mins=state_mins, state_maxs=state_maxs)
-        saver = tf.train.Saver()
+        saver = tf.compat.v1.train.Saver()
         save_path = model_path + '/best_validation'
 
         loss_keys = ['mse_last', 'mse']
@@ -191,8 +191,8 @@ class RNN():
         preproc_ao = tf.concat([preproc_o, preproc_a], axis=-1)
 
         if self.model == '2lstm' or self.model == '2gru':
-            lstm1_out, lstm1_final_state = tf.nn.dynamic_rnn(self.rnn1, preproc_ao, dtype=tf.float32)
-            lstm2_out, lstm2_final_state = tf.nn.dynamic_rnn(self.rnn2, lstm1_out, dtype=tf.float32)
+            lstm1_out, lstm1_final_state = tf.compat.v1.nn.dynamic_rnn(self.rnn1, preproc_ao, dtype=tf.float32)
+            lstm2_out, lstm2_final_state = tf.compat.v1.nn.dynamic_rnn(self.rnn2, lstm1_out, dtype=tf.float32)
             belief_list = lstm2_out
 
         elif self.model == 'ff':
@@ -218,16 +218,16 @@ class RNN():
 
             # connect all modules into the particle filter
             self.connect_modules(**statistics)
-            init = tf.global_variables_initializer()
+            init = tf.compat.v1.global_variables_initializer()
             sess.run(init)
 
         # load variables
-        all_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
+        all_vars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES)
         for v in all_vars:
             print("%s %r %s" % (v, v, v.shape))
 
         # restore variable values
-        saver = tf.train.Saver()  # <- var list goes in here
+        saver = tf.compat.v1.train.Saver()  # <- var list goes in here
         saver.restore(sess, os.path.join(model_path, model_file))
 
         # print('Loaded the following variables:')

@@ -8,9 +8,9 @@ import itertools
 from utils.exp_utils import get_default_hyperparams, add_to_log, exp_variables_to_name, print_msg_and_dict, sample_exp_variables
 from utils.data_utils import load_data, noisify_data_condition, compute_staticstics, make_batch_iterator, reduce_data, shuffle_data
 from utils.method_utils import compute_sq_distance
-from methods.dpf import DPF
-from methods.rnn import RNN
-from methods.odom import OdometryBaseline
+from methods_OLD.dpf import DPF
+from methods_OLD.rnn import RNN
+from methods_OLD.odom import OdometryBaseline
 
 def meta_exp(base_path, id_extra):
 
@@ -260,7 +260,7 @@ def run_experiment(get_experiment_params, get_train_data_and_eval_iterator, base
     log = dict()
 
     # SET THINGS UP
-    tf.reset_default_graph()
+    tf.compat.v1.reset_default_graph()
 
     print_msg_and_dict('STARTING EXPERIMENT', exp_params)
 
@@ -280,7 +280,7 @@ def run_experiment(get_experiment_params, get_train_data_and_eval_iterator, base
     else:
         print('I DONT KNOW THIS METHOD', exp_params['method'])
 
-    with tf.Session() as session:
+    with tf.compat.v1.Session() as session:
 
         t0 = time.time()
         if load_from_model_path is None:

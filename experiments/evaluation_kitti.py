@@ -12,13 +12,13 @@ def get_evaluation_stats(model_path='../models/tmp/', test_trajectories=[11], se
     data = load_kitti_sequences(test_trajectories)
 
     # reset tensorflow graph
-    tf.reset_default_graph()
+    tf.compat.v1.reset_default_graph()
 
     # instantiate method
     hyperparams = get_default_hyperparams()
     method = DPF(**hyperparams['global'])
 
-    with tf.Session() as session:
+    with tf.compat.v1.Session() as session:
 
         # load method and apply to new data
         method.load(session, model_path)

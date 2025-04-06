@@ -1,7 +1,7 @@
 import tensorflow as tf
 
-from methods.dpf_kitti import DPF
-from methods.odom import OdometryBaseline
+from methods_OLD.dpf_kitti import DPF
+from methods_OLD.odom import OdometryBaseline
 from utils.data_utils_kitti import load_data, noisyfy_data, make_batch_iterator, remove_state, split_data, load_kitti_sequences, make_batch_iterator_for_evaluation, wrap_angle, plot_video
 from utils.exp_utils_kitti import get_default_hyperparams
 import matplotlib.pyplot as plt

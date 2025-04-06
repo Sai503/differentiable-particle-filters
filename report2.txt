@@ -1,0 +1,66 @@
+TensorFlow 2.0 Upgrade Script
+-----------------------------
+Converted 6 files
+Detected 0 issues that require attention
+--------------------------------------------------------------------------------
+================================================================================
+Detailed log follows:
+
+================================================================================
+================================================================================
+Input tree: 'experiments/'
+================================================================================
+--------------------------------------------------------------------------------
+Processing file 'experiments/cross_validation_kitti.py'
+ outputting to 'experiments_v2/cross_validation_kitti.py'
+--------------------------------------------------------------------------------
+
+26:4: INFO: Renamed 'tf.reset_default_graph' to 'tf.compat.v1.reset_default_graph'
+34:9: INFO: Renamed 'tf.Session' to 'tf.compat.v1.Session'
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Processing file 'experiments/cross_evaluation.py'
+ outputting to 'experiments_v2/cross_evaluation.py'
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Processing file 'experiments/__init__.py'
+ outputting to 'experiments_v2/__init__.py'
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Processing file 'experiments/distributed_experiments.py'
+ outputting to 'experiments_v2/distributed_experiments.py'
+--------------------------------------------------------------------------------
+
+263:4: INFO: Renamed 'tf.reset_default_graph' to 'tf.compat.v1.reset_default_graph'
+283:9: INFO: Renamed 'tf.Session' to 'tf.compat.v1.Session'
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Processing file 'experiments/simple.py'
+ outputting to 'experiments_v2/simple.py'
+--------------------------------------------------------------------------------
+
+15:4: INFO: Renamed 'tf.reset_default_graph' to 'tf.compat.v1.reset_default_graph'
+21:9: INFO: Renamed 'tf.Session' to 'tf.compat.v1.Session'
+34:4: INFO: Renamed 'tf.reset_default_graph' to 'tf.compat.v1.reset_default_graph'
+40:9: INFO: Renamed 'tf.Session' to 'tf.compat.v1.Session'
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+Processing file 'experiments/evaluation_kitti.py'
+ outputting to 'experiments_v2/evaluation_kitti.py'
+--------------------------------------------------------------------------------
+
+15:4: INFO: Renamed 'tf.reset_default_graph' to 'tf.compat.v1.reset_default_graph'
+21:9: INFO: Renamed 'tf.Session' to 'tf.compat.v1.Session'
+--------------------------------------------------------------------------------
+

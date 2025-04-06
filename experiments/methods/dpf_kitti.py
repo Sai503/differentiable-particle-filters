@@ -4,11 +4,12 @@ import sonnet as snt
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
-from utils.data_utils import wrap_angle, compute_staticstics, split_data, make_batch_iterator, make_repeating_batch_iterator
+from utils.data_utils_kitti import wrap_angle, compute_statistics, split_data, make_batch_iterator, make_repeating_batch_iterator, rotation_matrix, load_data_for_stats
 from utils.method_utils import atan2, compute_sq_distance
 from utils.plotting_utils import plot_maze, show_pause
+from datetime import datetime
 
-if tf.__version__ == '1.1.0-rc1' or tf.__version__ == '1.3.0':
+if tf.__version__ == '1.1.0-rc1' or tf.__version__ == '1.2.0':
     from tensorflow.python.framework import ops
     @ops.RegisterGradient("FloorMod")
     def _mod_grad(op, grad):
@@ -21,7 +22,7 @@ if tf.__version__ == '1.1.0-rc1' or tf.__version__ == '1.3.0':
 
 class DPF():
 
-    def __init__(self, init_with_true_state, learn_odom, use_proposer, propose_ratio, proposer_keep_ratio, min_obs_likelihood):
+    def __init__(self, init_with_true_state, learn_odom, use_proposer, propose_ratio, proposer_keep_ratio, min_obs_likelihood, learn_gaussian_mle):
         """
         :param init_with_true_state:
         :param learn_odom:
@@ -39,21 +40,24 @@ class DPF():
         self.propose_ratio = propose_ratio if not self.init_with_true_state else 0.0
 
         # define some more parameters and placeholders
-        self.state_dim = 3
-        self.placeholders = {'o': tf.placeholder('float32', [None, None, 24, 24, 3], 'observations'),
-                             'a': tf.placeholder('float32', [None, None, 3], 'actions'),
-                             's': tf.placeholder('float32', [None, None, 3], 'states'),
-                             'num_particles': tf.placeholder('float32'),
-                             'keep_prob': tf.placeholder_with_default(tf.constant(1.0), []),
+        self.state_dim = 5
+        self.action_dim = 3
+        self.observation_dim = 6
+        self.placeholders = {'o': tf.compat.v1.placeholder('float32', [None, None, 50, 150, self.observation_dim], 'observations'),
+                             'a': tf.compat.v1.placeholder('float32', [None, None, 3], 'actions'),
+                             's': tf.compat.v1.placeholder('float32', [None, None, 5], 'states'),
+                             'num_particles': tf.compat.v1.placeholder('float32'),
+                             'keep_prob': tf.compat.v1.placeholder_with_default(tf.constant(1.0), []),
+                             'is_training': tf.compat.v1.placeholder_with_default(tf.constant(False), [])
                              }
         self.num_particles_float = self.placeholders['num_particles']
-        self.num_particles = tf.to_int32(self.num_particles_float)
+        self.num_particles = tf.cast(self.num_particles_float, dtype=tf.int32)
 
         # build learnable modules
-        self.build_modules(min_obs_likelihood, proposer_keep_ratio)
+        self.build_modules(min_obs_likelihood, proposer_keep_ratio, learn_gaussian_mle)
 
 
-    def build_modules(self, min_obs_likelihood, proposer_keep_ratio):
+    def build_modules(self, min_obs_likelihood, proposer_keep_ratio, learn_gaussian_mle):
         """
         :param min_obs_likelihood:
         :param proposer_keep_ratio:
@@ -64,9 +68,9 @@ class DPF():
 
         # conv net for encoding the image
         self.encoder = snt.Sequential([
-            snt.nets.ConvNet2D([16, 32, 64], [[3, 3]], [2], [snt.SAME], activate_final=True, name='encoder/convnet'),
+            snt.nets.ConvNet2D([16, 16, 16, 16], [[7, 7], [5, 5], [5, 5], [5, 5]], [[1,1], [1, 2], [1, 2], [2, 2]], [snt.SAME], activate_final=True, name='encoder/convnet'),
             snt.BatchFlatten(),
-            lambda x: tf.nn.dropout(x,  self.placeholders['keep_prob']),
+            lambda x: tf.nn.dropout(x,  rate=1 - (self.placeholders['keep_prob'])),
             snt.Linear(128, name='encoder/linear'),
             tf.nn.relu
         ])
@@ -83,7 +87,10 @@ class DPF():
         ], name='obs_like_estimator')
 
         # motion noise generator used for motion sampling
-        self.mo_noise_generator = snt.nets.MLP([32, 32, self.state_dim], activate_final=False, name='mo_noise_generator')
+        if learn_gaussian_mle:
+            self.mo_noise_generator = snt.nets.MLP([32, 32, 4], activate_final=False, name='mo_noise_generator')
+        else:
+            self.mo_noise_generator = snt.nets.MLP([32, 32, 2], activate_final=False, name='mo_noise_generator')
 
         # odometry model (if we want to learn it)
         if self.learn_odom:
@@ -94,7 +101,7 @@ class DPF():
             self.particle_proposer = snt.Sequential([
                 snt.Linear(128, name='particle_proposer/linear'),
                 tf.nn.relu,
-                lambda x: tf.nn.dropout(x,  proposer_keep_ratio),
+                lambda x: tf.nn.dropout(x,  rate=1 - (proposer_keep_ratio)),
                 snt.Linear(128, name='particle_proposer/linear'),
                 tf.nn.relu,
                 snt.Linear(128, name='particle_proposer/linear'),
@@ -105,6 +112,26 @@ class DPF():
                 tf.nn.tanh,
             ])
 
+        self.noise_scaler1 = snt.Module(lambda x: x * tf.exp(10 * tf.compat.v1.get_variable('motion_sampler/noise_scaler1', initializer=np.array(0.0, dtype='float32'))))
+        self.noise_scaler2 = snt.Module(lambda x: x * tf.exp(10 * tf.compat.v1.get_variable('motion_sampler/noise_scaler2', initializer=np.array(0.0, dtype='float32'))))
+
+
+    def custom_build(self, inputs):
+        """A custom build method to wrap into a sonnet Module."""
+        outputs = snt.Conv2D(output_channels=16, kernel_shape=[7, 7], stride=[1, 1])(inputs)
+        outputs = tf.nn.relu(outputs)
+        outputs = snt.Conv2D(output_channels=16, kernel_shape=[5, 5], stride=[1, 2])(outputs)
+        outputs = tf.nn.relu(outputs)
+        outputs = snt.Conv2D(output_channels=16, kernel_shape=[5, 5], stride=[1, 2])(outputs)
+        outputs = tf.nn.relu(outputs)
+        outputs = snt.Conv2D(output_channels=16, kernel_shape=[5, 5], stride=[2, 2])(outputs)
+        outputs = tf.nn.relu(outputs)
+        outputs = tf.nn.dropout(outputs,  rate=1 - (self.placeholders['keep_prob']))
+        outputs = snt.BatchFlatten()(outputs)
+        outputs = snt.Linear(128)(outputs)
+        outputs = tf.nn.relu(outputs)
+
+        return outputs
 
     def measurement_update(self, encoding, particles, means, stds):
         """
@@ -129,11 +156,7 @@ class DPF():
 
 
     def transform_particles_as_input(self, particles, means, stds):
-        return tf.concat([
-                   (particles[:, :, :2] - means['s'][:, :, :2]) / stds['s'][:, :, :2],  # normalized pos
-                   tf.cos(particles[:, :, 2:3]),  # cos
-                   tf.sin(particles[:, :, 2:3])], # sin
-                  axis=-1)
+        return ((particles - means['s']) / stds['s'])[..., 3:5]
 
 
     def propose_particles(self, encoding, num_particles, state_mins, state_maxs):
@@ -146,7 +169,7 @@ class DPF():
         return proposed_particles
 
 
-    def motion_update(self, actions, particles, means, stds, state_step_sizes, stop_sampling_gradient=False):
+    def motion_update(self, actions, particles, means, stds, state_step_sizes, learn_gaussian_mle, stop_sampling_gradient=False):
         """
         Move particles according to odometry info in actions. Add learned noise.
 
@@ -162,61 +185,74 @@ class DPF():
         # 1. SAMPLE NOISY ACTIONS
 
         # add dimension for particles
-        actions = actions[:, tf.newaxis, :]
+        time_step = 0.103
 
-        # prepare input (normalize actions and repeat per particle)
-        action_input = tf.tile(actions / stds['a'], [1, tf.shape(particles)[1], 1])
-        random_input = tf.random_normal(tf.shape(action_input))
-        input = tf.concat([action_input, random_input], axis=-1)
+        if learn_gaussian_mle:
+            actions = tf.concat([particles[:, :, 3:4] - means['s'][:, :, 3:4], particles[:, :, 4:5] - means['s'][:, :, 4:5]], axis=-1)
 
-        # estimate action noise
-        delta = snt.BatchApply(self.mo_noise_generator)(input)
-        if stop_sampling_gradient:
-            delta = tf.stop_gradient(delta)
+            # prepare input (normalize actions and repeat per particle)
+            action_input = actions / stds['s'][:, :, 3:5]
+            input = action_input
 
-        # zero-mean the action noise and add to actions
-        delta -= tf.reduce_mean(delta, axis=1, keep_dims=True)
-        noisy_actions = actions + delta
+            # estimate action noise
+            delta = snt.BatchApply(self.mo_noise_generator)(input)
+            delta = tf.concat([delta[:, :, 0:2] * state_step_sizes[3], delta[:, :, 2:4] * state_step_sizes[4]], axis=-1)
+            if stop_sampling_gradient:
+                delta = tf.stop_gradient(delta)
 
-        # 2. APPLY NOISY ACTIONS
-        if self.learn_odom:
+            action_vel_f = tf.random.normal(tf.shape(particles[:, :, 3:4]), mean = delta[:, :, 0:1], stddev = delta[:, :, 1:2])
+            action_vel_rot = tf.random.normal(tf.shape(particles[:, :, 4:5]), mean = delta[:, :, 2:3], stddev = delta[:, :, 3:4])
 
-            # prepare input (normalize states and actions)
-            state_input = self.transform_particles_as_input(particles, means, stds)
-            action_input = noisy_actions / stds['a']
-            input = tf.concat([state_input, action_input], axis=-1)
-            # estimate state delta, scale it, and apply it
-            state_delta = snt.BatchApply(self.mo_transition_model)(input)
-            new_states = [particles[:, :, i:i+1] + state_delta[:, :, i:i+1] * state_step_sizes[i] for i in range(3)]
-            moved_particles = tf.concat(new_states[:2] + [wrap_angle(new_states[2])], axis=-1)
+            heading = particles[:, :, 2:3]
+            sin_heading = tf.sin(heading)
+            cos_heading = tf.cos(heading)
+
+            new_x = particles[:, :, 0:1] + cos_heading * particles[:, :, 3:4] * time_step
+            new_y = particles[:, :, 1:2] + sin_heading * particles[:, :, 3:4] * time_step
+            new_theta = particles[:, :, 2:3] + particles[:, :, 4:5] * time_step
+            wrap_angle(new_theta)
+            new_v = particles[:, :, 3:4] + action_vel_f
+            new_theta_dot = particles[:, :, 4:5] + action_vel_rot
+
+            moved_particles = tf.concat([new_x, new_y, new_theta, new_v, new_theta_dot], axis=-1)
+
+            return moved_particles, delta
 
         else:
 
-            # compute sin and cos of the particles
-            theta = particles[:, :, 2:3]
-            sin_theta = tf.sin(theta)
-            cos_theta = tf.cos(theta)
-            # move the particles using the noisy actions
-            new_x = particles[:, :, 0:1] + (noisy_actions[:, :, 0:1] * cos_theta + noisy_actions[:, :, 1:2] * sin_theta)
-            new_y = particles[:, :, 1:2] + (noisy_actions[:, :, 0:1] * sin_theta - noisy_actions[:, :, 1:2] * cos_theta)
-            new_theta = wrap_angle(particles[:, :, 2:3] + noisy_actions[:, :, 2:3])
-            moved_particles = tf.concat([new_x, new_y, new_theta], axis=-1)
+            heading = particles[:, :, 2:3]
+            sin_heading = tf.sin(heading)
+            cos_heading = tf.cos(heading)
 
-        return moved_particles
+            random_input = tf.random.normal(tf.shape(particles[:, :, 3:5]))
+            noise = snt.BatchApply(self.mo_noise_generator)(random_input)
+            noise = noise - tf.reduce_mean(noise, axis=1, keepdims=True)
+
+            new_z = particles[:, :, 0:1] + cos_heading * particles[:, :, 3:4] * time_step
+            new_x = particles[:, :, 1:2] + sin_heading * particles[:, :, 3:4] * time_step
+            new_theta = wrap_angle(particles[:, :, 2:3] + particles[:, :, 4:5] * time_step)
+
+            new_v = particles[:, :, 3:4] + noise[:, :, :1] * state_step_sizes[3]
+            new_theta_dot = particles[:, :, 4:5] + noise[:, :, 1:] * state_step_sizes[4]
+
+            moved_particles = tf.concat([new_z, new_x, new_theta, new_v, new_theta_dot], axis=-1)
+
+            return moved_particles
 
 
-    def compile_training_stages(self, sess, batch_iterators, particle_list, particle_probs_list, encodings, means, stds, state_step_sizes, state_mins, state_maxs, learning_rate, plot_task):
+    def compile_training_stages(self, sess, batch_iterators, particle_list, particle_probs_list, encodings, means, stds, state_step_sizes, state_mins, state_maxs, learn_gaussian_mle, learning_rate, plot_task):
 
         # TRAINING!
         losses = dict()
         train_stages = dict()
+        std = 0.25
 
         # TRAIN ODOMETRY
 
         if self.learn_odom:
 
             # apply model
-            motion_samples = self.motion_update(self.placeholders['a'][:,1],
+            motion_samples = self.motion_update(self.placeholders['a'][:,0],
                                                 self.placeholders['s'][:, :1],
                                                 means, stds, state_step_sizes,
                                                 stop_sampling_gradient=True)
@@ -224,42 +260,62 @@ class DPF():
             # define loss and optimizer
             sq_distance = compute_sq_distance(motion_samples, self.placeholders['s'][:, 1:2], state_step_sizes)
             losses['motion_mse'] = tf.reduce_mean(sq_distance, name='loss')
-            optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-            var_list = [v for v in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES) if 'mo_transition_model' in v.name]
+            optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
 
             # put everything together
             train_stages['train_odom'] = {
-                         'train_op': optimizer.minimize(losses['motion_mse'], var_list=var_list),
+                         'train_op': optimizer.minimize(losses['motion_mse']),
                          'batch_iterator_names': {'train': 'train1', 'val': 'val1'},
                          'monitor_losses': ['motion_mse'],
                          'validation_loss': 'motion_mse',
-                         'plot': lambda e: self.plot_motion_model(sess, next(batch_iterators['val1']), motion_samples, plot_task) if e % 10 == 0 else None
+                         'plot': lambda e: self.plot_motion_model(sess, next(batch_iterators['val2']), motion_samples, plot_task, state_step_sizes) if e % 1 == 0 else None
                          }
 
         # TRAIN MOTION MODEL
 
-        # apply model
-        motion_samples = self.motion_update(self.placeholders['a'][:,1],
-                                            tf.tile(self.placeholders['s'][:, :1], [1, self.num_particles, 1]),
-                                            means, stds, state_step_sizes)
+        if learn_gaussian_mle:
+            motion_samples, motion_params = self.motion_update(self.placeholders['a'][:,1],
+                                                tf.tile(self.placeholders['s'][:, :1], [1, 1, 1]),
+                                                means, stds, state_step_sizes, learn_gaussian_mle)
 
-        # define loss and optimizer
-        std = 0.01
-        sq_distance = compute_sq_distance(motion_samples, self.placeholders['s'][:, 1:2], state_step_sizes)
-        activations_sample = (1 / self.num_particles_float) / tf.sqrt(2 * np.pi * std ** 2) * tf.exp(
-            -sq_distance / (2.0 * std ** 2))
-        losses['motion_mle'] = tf.reduce_mean(-tf.log(1e-16 + tf.reduce_sum(activations_sample, axis=-1, name='loss')))
-        optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-        var_list = [v for v in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES) if 'mo_noise_generator' in v.name]
+            # define loss and optimizer
+            diff_in_states = self.placeholders['s'][:, 1:2] - self.placeholders['s'][:, :1]
+            activations_vel_f = (1 / 32) / tf.sqrt(2 * np.pi * motion_params[:, :, 1] ** 2) * tf.exp(
+                -(diff_in_states[:, :, 3] - motion_params[:, :, 0]) ** 2 / (2.0 * motion_params[:, :, 1] ** 2))
+            activations_vel_rot = (1 / 32) / tf.sqrt(2 * np.pi * motion_params[:, :, 3] ** 2) * tf.exp(
+                -(diff_in_states[:, :, 4] - motion_params[:, :, 2]) ** 2 / (2.0 * motion_params[:, :, 3] ** 2))
+            losses['motion_mle'] = tf.reduce_mean(-tf.math.log(1e-16 + (tf.reduce_sum(activations_vel_f, axis=-1, name='loss1') * tf.reduce_sum(activations_vel_rot, axis=-1, name='loss2'))))
+            optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
 
-        # put everything together
-        train_stages['train_motion_sampling'] = {
-                     'train_op': optimizer.minimize(losses['motion_mle'], var_list=var_list),
-                     'batch_iterator_names': {'train': 'train1', 'val': 'val1'},
-                     'monitor_losses': ['motion_mle'],
-                     'validation_loss': 'motion_mle',
-                     'plot': lambda e: self.plot_motion_model(sess, next(batch_iterators['val1']), motion_samples, plot_task) if e % 10 == 0 else None
-                     }
+            # put everything together
+            train_stages['train_motion_sampling'] = {
+                         'train_op': optimizer.minimize(losses['motion_mle']),
+                         'batch_iterator_names': {'train': 'train2', 'val': 'val2'},
+                         'monitor_losses': ['motion_mle'],
+                         'validation_loss': 'motion_mle',
+                         'plot': lambda e: self.plot_motion_model(sess, next(batch_iterators['val2']), motion_samples, plot_task, state_step_sizes) if e % 1 == 0 else None
+                         }
+
+        else:
+            motion_samples = self.motion_update(self.placeholders['a'][:,1],
+                                    tf.tile(self.placeholders['s'][:, :1], [1, self.num_particles, 1]),
+                                    means, stds, state_step_sizes, learn_gaussian_mle)
+
+            # define loss and optimizer
+            sq_distance = compute_sq_distance(motion_samples, self.placeholders['s'][:, 1:2], state_step_sizes)
+            activations_sample = (1 / self.num_particles_float) / tf.sqrt(2 * np.pi * std ** 2) * tf.exp(
+                -sq_distance / (2.0 * std ** 2))
+            losses['motion_mle'] = tf.reduce_mean(-tf.math.log(1e-16 + tf.reduce_sum(activations_sample, axis=-1, name='loss')))
+            optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
+
+            # put everything together
+            train_stages['train_motion_sampling'] = {
+                         'train_op': optimizer.minimize(losses['motion_mle']),
+                         'batch_iterator_names': {'train': 'train2', 'val': 'val2'},
+                         'monitor_losses': ['motion_mle'],
+                         'validation_loss': 'motion_mle',
+                         'plot': lambda e: self.plot_motion_model(sess, next(batch_iterators['val2']), motion_samples, plot_task, state_step_sizes) if e % 1 == 0 else None
+                         }
 
         # TRAIN MEASUREMENT MODEL
 
@@ -268,20 +324,19 @@ class DPF():
         measurement_model_out = self.measurement_update(encodings[:, 0], test_particles, means, stds)
 
         # define loss (correct -> 1, incorrect -> 0) and optimizer
-        correct_samples = tf.diag_part(measurement_model_out)
-        incorrect_samples = measurement_model_out - tf.diag(tf.diag_part(measurement_model_out))
-        losses['measurement_heuristic'] = tf.reduce_sum(-tf.log(correct_samples)) / tf.cast(self.batch_size, tf.float32) \
-                                          + tf.reduce_sum(-tf.log(1.0 - incorrect_samples)) / tf.cast(self.batch_size * (self.batch_size - 1), tf.float32)
-        optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-        var_list = [v for v in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES) if 'encoder' in v.name or 'obs_like_estimator' in v.name]
+        correct_samples = tf.linalg.tensor_diag_part(measurement_model_out)
+        incorrect_samples = measurement_model_out - tf.linalg.tensor_diag(tf.linalg.tensor_diag_part(measurement_model_out))
+        losses['measurement_heuristic'] = tf.reduce_sum(-tf.math.log(correct_samples)) / tf.cast(self.batch_size, tf.float32) \
+                                          + tf.reduce_sum(-tf.math.log(1.0 - incorrect_samples)) / tf.cast(self.batch_size * (self.batch_size - 1), tf.float32)
+        optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
 
         # put everything together
         train_stages['train_measurement_model'] = {
-                     'train_op': optimizer.minimize(losses['measurement_heuristic'], var_list=var_list),
+                     'train_op': optimizer.minimize(losses['measurement_heuristic']),
                      'batch_iterator_names': {'train': 'train1', 'val': 'val1'},
                      'monitor_losses': ['measurement_heuristic'],
                      'validation_loss': 'measurement_heuristic',
-                     'plot': lambda e: self.plot_measurement_model(sess, batch_iterators['val1'], measurement_model_out) if e % 10 == 0 else None
+                     'plot': lambda e: self.plot_measurement_model(sess, batch_iterators['val1'], measurement_model_out) if e % 1 == 0 else None
                      }
 
         # TRAIN PARTICLE PROPOSER
@@ -297,45 +352,51 @@ class DPF():
             sq_distance = compute_sq_distance(proposed_particles, self.placeholders['s'][:, :1], state_step_sizes)
             activations = (1 / self.num_particles_float) / tf.sqrt(2 * np.pi * std ** 2) * tf.exp(
                 -sq_distance / (2.0 * std ** 2))
-            losses['proposed_mle'] = tf.reduce_mean(-tf.log(1e-16 + tf.reduce_sum(activations, axis=-1)))
-            optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-            var_list = [v for v in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES) if 'particle_proposer' in v.name]
+            losses['proposed_mle'] = tf.reduce_mean(-tf.math.log(1e-16 + tf.reduce_sum(activations, axis=-1)))
+            optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
 
             # put everything together
             train_stages['train_particle_proposer'] = {
-                         'train_op': optimizer.minimize(losses['proposed_mle'], var_list=var_list),
+                         'train_op': optimizer.minimize(losses['proposed_mle']),
                          'batch_iterator_names': {'train': 'train1', 'val': 'val1'},
                          'monitor_losses': ['proposed_mle'],
                          'validation_loss': 'proposed_mle',
                          'plot': lambda e: self.plot_particle_proposer(sess, next(batch_iterators['val1']), proposed_particles, plot_task) if e % 10 == 0 else None
                          }
 
+
         # END-TO-END TRAINING
 
-        # model was already applyed further up -> particle_list, particle_probs_list
+        # model was already applied further up -> particle_list, particle_probs_list
 
         # define losses and optimizer
         # first loss (which is being optimized)
-        sq_distance = compute_sq_distance(particle_list, self.placeholders['s'][:, :, tf.newaxis, :], state_step_sizes)
-        activations = particle_probs_list[:, :] / tf.sqrt(2 * np.pi * std ** 2) * tf.exp(
+        sq_distance = compute_sq_distance(particle_list[:, :, :, 3:5], self.placeholders['s'][:, :, tf.newaxis, 3:5], state_step_sizes[3:5])
+        activations = particle_probs_list[:, :] / tf.sqrt(2 * np.pi * self.particle_std ** 2) * tf.exp(
             -sq_distance / (2.0 * self.particle_std ** 2))
-        losses['mle'] = tf.reduce_mean(-tf.log(1e-16 + tf.reduce_sum(activations, axis=2, name='loss')))
+        losses['mle'] = tf.reduce_mean(-tf.math.log(1e-16 + tf.reduce_sum(activations, axis=2, name='loss')))
+
         # second loss (which we will monitor during execution)
         pred = self.particles_to_state(particle_list, particle_probs_list)
 
-        sq_distance = compute_sq_distance(pred[:, -1, :], self.placeholders['s'][:, -1, :], state_step_sizes)
-        losses['mse_last'] = tf.reduce_mean(sq_distance)
+        sq_error = compute_sq_distance(pred[:, -1, 0:2], self.placeholders['s'][:, -1, 0:2], [1., 1.])
+        sq_dist = compute_sq_distance(self.placeholders['s'][:, 0, 0:2], self.placeholders['s'][:, -1, 0:2], [1., 1.])
+        losses['m/m'] = tf.reduce_mean(sq_error**0.5/sq_dist**0.5)
+
+        sq_error = compute_sq_distance(pred[:, -1, 2:3], self.placeholders['s'][:, -1, 2:3], [np.pi/180.0])
+        losses['deg/m'] = tf.reduce_mean(sq_error ** 0.5 / sq_dist ** 0.5)
+
         # optimizer
-        optimizer = tf.train.AdamOptimizer(learning_rate)
+        optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate)
 
         # put everything together
         train_stages['train_e2e'] = {
                      'train_op': optimizer.minimize(losses['mle']),
                      'batch_iterator_names': {'train': 'train', 'val': 'val'},
-                     'monitor_losses': ['mse_last', 'mle'],
-                     'validation_loss': 'mse_last',
+                     'monitor_losses': ['m/m', 'deg/m', 'mle'],
+                     'validation_loss': 'deg/m',
                      'plot': lambda e: self.plot_particle_filter(sess, next(batch_iterators['val_ex']), particle_list,
-                                                                 particle_probs_list, self.num_particles, state_step_sizes, plot_task) if e % 1 == 0 else None
+                                                                 particle_probs_list, state_step_sizes, plot_task) if e % 1 == 0 else None
                      }
 
         return losses, train_stages
@@ -356,13 +417,11 @@ class DPF():
 
             # connect all modules into the particle filter
             self.connect_modules(**statistics)
-            init = tf.global_variables_initializer()
+            init = tf.compat.v1.global_variables_initializer()
             sess.run(init)
-        else:
-            statistics = None
 
         # load variables
-        all_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
+        all_vars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES)
         vars_to_load = []
         loaded_modules = set()
         for v in all_vars:
@@ -371,50 +430,46 @@ class DPF():
                     vars_to_load.append(v)
                     loaded_modules.add(m)
 
-        print('Loading these modules:', loaded_modules)
+        print('Loading all modules')
 
-        print('%s %s' % (model_path, model_file))
-        print('%r %r' % (model_path, model_file))
-
-        # restore variable values
-        saver = tf.train.Saver(vars_to_load)  # <- var list goes in here
+        saver = tf.compat.v1.train.Saver()
         saver.restore(sess, os.path.join(model_path, model_file))
 
-        print('Loaded the following variables:')
-        for v in vars_to_load:
-            print(v.name)
-
-        return statistics
-
-
-    def fit(self, sess, data, model_path, train_individually, train_e2e, split_ratio, seq_len, batch_size, epoch_length, num_epochs, patience, learning_rate, dropout_keep_ratio, num_particles, particle_std, plot_task=None, plot=False):
+    # def fit(self, sess, data, model_path, train_individually, train_e2e, split_ratio, seq_len, batch_size, epoch_length, num_epochs, patience, learning_rate, dropout_keep_ratio, num_particles, particle_std, plot_task=None, plot=False):
+    def fit(self, sess, data, model_path, train_individually, train_e2e, split_ratio, seq_len, batch_size, epoch_length, num_epochs, patience, learning_rate, dropout_keep_ratio, num_particles, particle_std, learn_gaussian_mle, plot_task=None, plot=False):
+        if plot:
+            plt.ion()
 
         self.particle_std = particle_std
 
-        # preprocess data
+        mean_loss_for_plot = np.zeros((1,))
+
+        means, stds, state_step_sizes, state_mins, state_maxs = compute_statistics(data)
+
+
         data = split_data(data, ratio=split_ratio)
+
         epoch_lengths = {'train': epoch_length, 'val': epoch_length*2}
         batch_iterators = {'train': make_batch_iterator(data['train'], seq_len=seq_len, batch_size=batch_size),
                            'val': make_repeating_batch_iterator(data['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=seq_len),
                            'train_ex': make_batch_iterator(data['train'], batch_size=batch_size, seq_len=seq_len),
                            'val_ex': make_batch_iterator(data['val'], batch_size=batch_size, seq_len=seq_len),
-                           'train1': make_batch_iterator(data['train'], batch_size=batch_size, seq_len=2),
-                           'val1': make_repeating_batch_iterator(data['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=2),
-                           }
-
-        # compute some statistics of the training data
-        means, stds, state_step_sizes, state_mins, state_maxs = compute_staticstics(data['train'])
+                           'train1': make_batch_iterator(data['train'], batch_size=batch_size, seq_len=1),
+                           'train2': make_batch_iterator(data['train'], batch_size=batch_size, seq_len=2),
+                            'val1': make_repeating_batch_iterator(data['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=1),
+                            'val2': make_repeating_batch_iterator(data['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=2),
+                        }
 
         # build the tensorflow graph by connecting all modules in the particles filter
-        particles, particle_probs, encodings, particle_list, particle_probs_list = self.connect_modules(means, stds, state_mins, state_maxs, state_step_sizes)
+        particles, particle_probs, encodings, particle_list, particle_probs_list = self.connect_modules(means, stds, state_mins, state_maxs, state_step_sizes, learn_gaussian_mle)
 
         # define losses and train stages for different ways of training (e.g. training individual models and e2e training)
         losses, train_stages = self.compile_training_stages(sess, batch_iterators, particle_list, particle_probs_list,
                                                             encodings, means, stds, state_step_sizes, state_mins,
-                                                            state_maxs, learning_rate, plot_task)
+                                                            state_maxs, learn_gaussian_mle, learning_rate, plot_task)
 
         # initialize variables
-        init = tf.global_variables_initializer()
+        init = tf.compat.v1.global_variables_initializer()
         sess.run(init)
 
         # save statistics and prepare saving variables
@@ -422,7 +477,7 @@ class DPF():
             os.makedirs(model_path)
         np.savez(os.path.join(model_path, 'statistics'), means=means, stds=stds, state_step_sizes=state_step_sizes,
                  state_mins=state_mins, state_maxs=state_maxs)
-        saver = tf.train.Saver()
+        saver = tf.compat.v1.train.Saver()
         save_path = os.path.join(model_path, 'best_validation')
 
         # define the training curriculum
@@ -430,8 +485,8 @@ class DPF():
         if train_individually:
             if self.learn_odom:
                 curriculum += ['train_odom']
-            curriculum += ['train_motion_sampling']
             curriculum += ['train_measurement_model']
+            curriculum += ['train_motion_sampling']
             if self.use_proposer:
                 curriculum += ['train_particle_proposer']
         if train_e2e:
@@ -453,6 +508,10 @@ class DPF():
             best_epoch = 0
             epoch = 0
 
+            if c == 'train_e2e':
+                saver.save(sess, os.path.join(model_path, 'before_e2e/best_validation'))
+                np.savez(os.path.join(model_path, 'before_e2e/statistics'), means=means, stds=stds, state_step_sizes=state_step_sizes,
+                 state_mins=state_mins, state_maxs=state_maxs)
             while epoch < num_epochs and epoch - best_epoch < patience:
                 # training
                 for dk in data_keys:
@@ -465,13 +524,13 @@ class DPF():
                         # t0 = time.time()
                         # pick a batch from the right iterator
                         batch = next(batch_iterators[stage['batch_iterator_names'][dk]])
-
                         # define the inputs and train/run the model
                         input_dict = {**{self.placeholders[key]: batch[key] for key in 'osa'},
                                       **{self.placeholders['num_particles']: num_particles},
                                       }
                         if dk == 'train':
                             input_dict[self.placeholders['keep_prob']] = dropout_keep_ratio
+                            input_dict[self.placeholders['is_training']] = True
                         monitor_losses = {l: losses[l] for l in stage['monitor_losses']}
                         if dk == 'train':
                             s_losses, _ = sess.run([monitor_losses, stage['train_op']], input_dict)
@@ -486,9 +545,11 @@ class DPF():
                         log[c][dk][lk]['mean'].append(np.mean(loss_lists[lk]))
                         log[c][dk][lk]['se'].append(np.std(loss_lists[lk], ddof=1) / np.sqrt(len(loss_lists[lk])))
 
+
                 # check whether the current model is better than all previous models
                 if 'val' in data_keys:
                     current_val_loss = log[c]['val'][stage['validation_loss']]['mean'][-1]
+                    mean_loss_for_plot = np.append(mean_loss_for_plot,current_val_loss)
                     if current_val_loss < best_val_loss:
                         best_val_loss = current_val_loss
                         best_epoch = epoch
@@ -508,11 +569,9 @@ class DPF():
                     for dk in data_keys:
                         if len(log[c][dk][lk]['mean']) > 0:
                             txt += '{:.2f}+-{:.2f}/'.format(log[c][dk][lk]['mean'][-1], log[c][dk][lk]['se'][-1])
+
                     txt = txt[:-1] + ' -- '
                 print(txt)
-
-                # t1 = time.time()
-                # time_deltas.append(t1 - t0)
 
                 if plot:
                     stage['plot'](epoch)
@@ -525,11 +584,11 @@ class DPF():
         return log
 
 
-    def predict(self, sess, batch, num_particles, return_particles=False, **kwargs):
+    def predict(self, sess, batch, return_particles=False, **kwargs):
         # define input dict, use the first state only if we do tracking
         input_dict = {self.placeholders['o']: batch['o'],
                       self.placeholders['a']: batch['a'],
-                      self.placeholders['num_particles']: num_particles}
+                      self.placeholders['num_particles']: 100}
         if self.init_with_true_state:
             input_dict[self.placeholders['s']] = batch['s'][:, :1]
 
@@ -539,7 +598,7 @@ class DPF():
             return sess.run(self.pred_states, input_dict)
 
 
-    def connect_modules(self, means, stds, state_mins, state_maxs, state_step_sizes):
+    def connect_modules(self, means, stds, state_mins, state_maxs, state_step_sizes, learn_gaussian_mle=False):
 
         # get shapes
         self.batch_size = tf.shape(self.placeholders['o'])[0]
@@ -548,7 +607,6 @@ class DPF():
         self.action_dim = self.placeholders['a'].get_shape()[-1].value
 
         encodings = snt.BatchApply(self.encoder)((self.placeholders['o'] - means['o']) / stds['o'])
-        self.encodings = encodings
 
         # initialize particles
         if self.init_with_true_state:
@@ -562,7 +620,7 @@ class DPF():
             else:
                 # sample particles randomly
                 initial_particles = tf.concat(
-                    [tf.random_uniform([self.batch_size, self.num_particles, 1], state_mins[d], state_maxs[d]) for d in
+                    [tf.random.uniform([self.batch_size, self.num_particles, 1], state_mins[d], state_maxs[d]) for d in
                      range(self.state_dim)], axis=-1, name='particles')
 
         initial_particle_probs = tf.ones([self.batch_size, self.num_particles],
@@ -595,18 +653,22 @@ class DPF():
 
                 # resampling
                 basic_markers = tf.linspace(0.0, (num_resampled_float - 1.0) / num_resampled_float, num_resampled)
-                random_offset = tf.random_uniform([self.batch_size], 0.0, 1.0 / num_resampled_float)
+                random_offset = tf.random.uniform([self.batch_size], 0.0, 1.0 / num_resampled_float)
                 markers = random_offset[:, None] + basic_markers[None, :]  # shape: batch_size x num_resampled
                 cum_probs = tf.cumsum(particle_probs, axis=1)
                 marker_matching = markers[:, :, None] < cum_probs[:, None, :]  # shape: batch_size x num_resampled x num_particles
-                samples = tf.cast(tf.argmax(tf.cast(marker_matching, 'int32'), dimension=2), 'int32')
+                samples = tf.cast(tf.argmax(tf.cast(marker_matching, 'int32'), axis=2), 'int32')
                 standard_particles = permute_batch(particles, samples)
                 standard_particle_probs = tf.ones([self.batch_size, num_resampled])
                 standard_particles = tf.stop_gradient(standard_particles)
                 standard_particle_probs = tf.stop_gradient(standard_particle_probs)
 
                 # motion update
-                standard_particles = self.motion_update(self.placeholders['a'][:, i], standard_particles, means, stds, state_step_sizes)
+                if learn_gaussian_mle:
+                    standard_particles, _ = self.motion_update(self.placeholders['a'][:, i], standard_particles, means, stds, state_step_sizes, learn_gaussian_mle)
+                else:
+                    standard_particles = self.motion_update(self.placeholders['a'][:, i], standard_particles, means, stds, state_step_sizes, learn_gaussian_mle)
+
 
                 # measurement update
                 standard_particle_probs *= self.measurement_update(encodings[:, i], standard_particles, means, stds)
@@ -628,13 +690,13 @@ class DPF():
                 particle_probs = standard_particle_probs
 
             else:
-                standard_particle_probs *= (num_resampled_float / self.num_particles_float) / tf.reduce_sum(standard_particle_probs, axis=1, keep_dims=True)
-                proposed_particle_probs *= (num_proposed_float / self.num_particles_float) / tf.reduce_sum(proposed_particle_probs, axis=1, keep_dims=True)
+                standard_particle_probs *= (num_resampled_float / self.num_particles_float) / tf.reduce_sum(standard_particle_probs, axis=1, keepdims=True)
+                proposed_particle_probs *= (num_proposed_float / self.num_particles_float) / tf.reduce_sum(proposed_particle_probs, axis=1, keepdims=True)
                 particles = tf.concat([standard_particles, proposed_particles], axis=1)
                 particle_probs = tf.concat([standard_particle_probs, proposed_particle_probs], axis=1)
 
             # NORMALIZE PROBABILITIES
-            particle_probs /= tf.reduce_sum(particle_probs, axis=1, keep_dims=True)
+            particle_probs /= tf.reduce_sum(particle_probs, axis=1, keepdims=True)
 
             particle_list = tf.concat([particle_list, particles[:, tf.newaxis]], axis=1)
             particle_probs_list = tf.concat([particle_probs_list, particle_probs[:, tf.newaxis]], axis=1)
@@ -649,8 +711,8 @@ class DPF():
 
         # run the filtering process
         particles, particle_probs, particle_list, particle_probs_list, additional_probs_list, i = tf.while_loop(
-            lambda *x: x[-1] < self.seq_len, loop,
-            [initial_particles, initial_particle_probs, particle_list, particle_probs_list, additional_probs_list,
+            cond=lambda *x: x[-1] < self.seq_len, body=loop,
+            loop_vars=[initial_particles, initial_particle_probs, particle_list, particle_probs_list, additional_probs_list,
              tf.constant(1, dtype='int32')], name='loop')
 
         # compute mean of particles
@@ -663,12 +725,13 @@ class DPF():
     def particles_to_state(self, particle_list, particle_probs_list):
         mean_position = tf.reduce_sum(particle_probs_list[:, :, :, tf.newaxis] * particle_list[:, :, :, :2], axis=2)
         mean_orientation = atan2(
-            tf.reduce_sum(particle_probs_list[:, :, :, tf.newaxis] * tf.cos(particle_list[:, :, :, 2:]), axis=2),
-            tf.reduce_sum(particle_probs_list[:, :, :, tf.newaxis] * tf.sin(particle_list[:, :, :, 2:]), axis=2))
-        return tf.concat([mean_position, mean_orientation], axis=2)
+            tf.reduce_sum(particle_probs_list[:, :, :, tf.newaxis] * tf.cos(particle_list[:, :, :, 2:3]), axis=2),
+            tf.reduce_sum(particle_probs_list[:, :, :, tf.newaxis] * tf.sin(particle_list[:, :, :, 2:3]), axis=2))
+        mean_velocity = tf.reduce_sum(particle_probs_list[:, :, :, tf.newaxis] * particle_list[:, :, :, 3:5], axis=2)
+        return tf.concat([mean_position, mean_orientation, mean_velocity], axis=2)
 
 
-    def plot_motion_model(self, sess, batch, motion_samples, task):
+    def plot_motion_model(self, sess, batch, motion_samples, task, state_step_sizes):
 
         # define the inputs and train/run the model
         input_dict = {**{self.placeholders[key]: batch[key] for key in 'osa'},
@@ -679,12 +742,16 @@ class DPF():
 
         plt.figure('Motion Model')
         plt.gca().clear()
-        plot_maze(task)
         for i in range(min(len(s_motion_samples), 10)):
-            plt.quiver(s_motion_samples[i, :, 0], s_motion_samples[i, :, 1], np.cos(s_motion_samples[i, :, 2]), np.sin(s_motion_samples[i, :, 2]), color='blue', width=0.001, scale=100)
-            plt.quiver(batch['s'][i, 0, 0], batch['s'][i, 0, 1], np.cos(batch['s'][i, 0, 2]), np.sin(batch['s'][i, 0, 2]), color='black', scale=50, width=0.003)
-            plt.quiver(batch['s'][i, 1, 0], batch['s'][i, 1, 1], np.cos(batch['s'][i, 1, 2]), np.sin(batch['s'][i, 1, 2]), color='red', scale=50, width=0.003)
+            plt.scatter(s_motion_samples[i, :, 3] / state_step_sizes[3], s_motion_samples[i, :, 4] / state_step_sizes[4], color='blue', s=1)
+            plt.scatter(batch['s'][i, 0, 3] / state_step_sizes[3], batch['s'][i, 0, 4] / state_step_sizes[4], color='black', s=1)
+            plt.scatter(batch['s'][i, 1, 3] / state_step_sizes[3], batch['s'][i, 1, 4] / state_step_sizes[4], color='red', s=3)
+            plt.plot(batch['s'][i, :2, 3] / state_step_sizes[3], batch['s'][i, :2, 4] / state_step_sizes[4], color='black')
 
+        plt.xlim([0, 200])
+        plt.ylim([-50, 50])
+        plt.xlabel('translational vel')
+        plt.ylabel('angular vel')
         plt.gca().set_aspect('equal')
         plt.pause(0.01)
 
@@ -698,13 +765,19 @@ class DPF():
                       **{self.placeholders['num_particles']: 100},
                       }
 
-        s_measurement_model_out = sess.run(measurement_model_out, input_dict)
+        s_measurement_model_out = sess.run([measurement_model_out], input_dict)
 
         plt.figure('Measurement Model Output')
         plt.gca().clear()
-        plt.imshow(s_measurement_model_out, interpolation="nearest", cmap="coolwarm")
-        plt.pause(0.01)
+        plt.imshow(s_measurement_model_out[0], interpolation="nearest", cmap="viridis_r", vmin=0.0, vmax=1.0)
 
+        plt.figure('Measurement Model Input')
+        plt.clf()
+        plt.scatter(batch['s'][:1, 0, 3], batch['s'][:1, 0, 4], marker='x', c=s_measurement_model_out[0][0,:1], vmin=0, vmax=1.0, cmap='viridis_r')
+        plt.scatter(batch['s'][1:, 0, 3], batch['s'][1:, 0, 4], marker='o', c=s_measurement_model_out[0][0,1:], vmin=0, vmax=1.0, cmap='viridis_r')
+        plt.xlabel('x_dot')
+        plt.ylabel('theta_dot')
+        plt.pause(0.01)
 
 
     def plot_particle_proposer(self, sess, batch, proposed_particles, task):
@@ -729,60 +802,40 @@ class DPF():
 
 
     def plot_particle_filter(self, sess, batch, particle_list,
-                        particle_probs_list, num_particles, state_step_sizes, task):
+                        particle_probs_list, state_step_sizes, task):
 
-        num_particles = 1000
-        head_scale = 1.5
-        quiv_kwargs = {'scale_units': 'xy', 'scale': 1. / 40., 'width': 0.003, 'headlength': 5 * head_scale,
-                       'headwidth': 3 * head_scale, 'headaxislength': 4.5 * head_scale}
-        marker_kwargs = {'markersize': 4.5, 'markerfacecolor': 'None', 'markeredgewidth': 0.5}
+        s_states, s_particle_list, s_particle_probs_list, \
+            = sess.run([self.placeholders['s'], particle_list,
+                        particle_probs_list], #self.noise_scaler1(1.0), self.noise_scaler2(2.0)],
+                       {**{self.placeholders[key]: batch[key] for key in 'osa'},
+                        **{self.placeholders['num_particles']: 20},
+                        })
+        # print('learned motion noise factors {:.2f}/{:.2f}'.format(n1, n2))
 
-        color_list = plt.cm.tab10(np.linspace(0, 1, 10))
-        colors = {'lstm': color_list[0], 'pf_e2e': color_list[1], 'pf_ind_e2e': color_list[2], 'pf_ind': color_list[3],
-                  'ff': color_list[4], 'odom': color_list[4]}
+        num_steps = s_particle_list.shape[1]
 
-        pred, s_particle_list, s_particle_probs_list = self.predict(sess, batch, num_particles,
-                                                                      return_particles=True)
+        for s in range(3):
 
-        num_steps = 20  # s_particle_list.shape[1]
+            plt.figure('particle_evolution, example {}'.format(s))
+            plt.clf()
 
-        for s in range(1):
+            for d in range(5):
 
-            plt.figure("example {}".format(s), figsize=[12, 5.15])
-            plt.gca().clear()
+                plt.subplot(3, 2, [1, 3, 5, 2, 4][d])
 
-            for i in range(num_steps):
-                ax = plt.subplot(4, 5, i + 1, frameon=False)
-                plt.gca().clear()
+                for i in range(num_steps):
 
-                plot_maze(task, margin=5, linewidth=0.5)
+                    plt.scatter(i * np.ones_like(s_particle_list[s, i, :, d]),
+                                s_particle_list[s, i, :, d] / (1 if s == 0 else state_step_sizes[d]),
+                                c=s_particle_probs_list[s, i, :], cmap='viridis_r', marker='o', s=6, alpha=0.5,
+                                linewidths=0.05,
+                                vmin=0.0,
+                                vmax=0.1)
+                    current_state = batch['s'][s, i, d] / (1 if s == 0 else state_step_sizes[d])
+                    plt.plot([i], [current_state], 'o', markerfacecolor='None', markeredgecolor='k',
+                             markersize=2.5)
 
-                if i < num_steps - 1:
-                    ax.quiver(s_particle_list[s, i, :, 0], s_particle_list[s, i, :, 1],
-                              np.cos(s_particle_list[s, i, :, 2]), np.sin(s_particle_list[s, i, :, 2]),
-                              s_particle_probs_list[s, i, :], cmap='viridis_r', clim=[.0, 2.0 / num_particles],
-                              alpha=1.0,
-                              **quiv_kwargs
-                              )
-
-                    current_state = batch['s'][s, i, :]
-                    plt.quiver(current_state[0], current_state[1], np.cos(current_state[2]),
-                               np.sin(current_state[2]), color="red", **quiv_kwargs)
-
-                    plt.plot(current_state[0], current_state[1], 'or', **marker_kwargs)
-                else:
-
-                    ax.plot(batch['s'][s, :num_steps, 0], batch['s'][s, :num_steps, 1], '-', linewidth=0.6, color='red')
-                    ax.plot(pred[s, :num_steps, 0], pred[s, :num_steps, 1], '-', linewidth=0.6,
-                            color=colors['pf_ind_e2e'])
-
-                    ax.plot(batch['s'][s, :1, 0], batch['s'][s, :1, 1], '.', linewidth=0.6, color='red', markersize=3)
-                    ax.plot(pred[s, :1, 0], pred[s, :1, 1], '.', linewidth=0.6, markersize=3,
-                            color=colors['pf_ind_e2e'])
-
-                plt.subplots_adjust(left=0.0, bottom=0.0, right=1.0, top=1.0, wspace=0.001, hspace=0.1)
-                plt.gca().set_aspect('equal')
-                plt.xticks([])
-                plt.yticks([])
+                plt.xlabel('Time')
+                plt.ylabel('State {}'.format(d))
 
         show_pause(pause=0.01)
