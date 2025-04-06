@@ -174,6 +174,8 @@ class DPF(nn.Module):
         state_step_sizes: list or array of length 3.
         """
         # Expand actions to match particles.
+        print(actions.shape)
+        actions = torch.tensor(actions)
         actions_exp = actions.unsqueeze(1)  # [B, 1, 3]
         std_a = stds['a']
         if not torch.is_tensor(std_a):
@@ -235,9 +237,13 @@ class DPF(nn.Module):
           - a: [B, T, 3]
           - s: [B, T, 3]
         """
-        B, T = batch['o'].size(0), batch['o'].size(1)
+        print(batch['o'].shape)
+        B, T = batch['o'].shape[0], batch['o'].shape[1]
         # Flatten time dimension to process images through encoder.
-        o = batch['o'].view(B * T, batch['o'].size(-3), batch['o'].size(-2), batch['o'].size(-1))
+        # o = batch['o'].view(B * T, batch['o'].shape[-3], batch['o'].shape[-2], batch['o'].shape[-1])
+        o = torch.tensor(batch['o'], dtype=torch.float32, device=batch['s'].device).view(
+            B * T, batch['o'].shape[-3], batch['o'].shape[-2], batch['o'].shape[-1]
+        )
         if o.size(1) != 3:
             o = o.permute(0, 3, 1, 2)
         encodings = self.forward_encoder(o).view(B, T, -1)  # [B, T, 128]
@@ -482,6 +488,7 @@ class DPF(nn.Module):
         self.state_step_sizes, self.state_mins, self.state_maxs = state_step_sizes, state_mins, state_maxs
 
         # Build the full model graph (i.e. connect modules) on one batch.
+        print("batch iterator type: ", type(batch_iterators['train']))
         _ = self.connect_modules(next(batch_iterators['train']), means, stds, state_mins, state_maxs, state_step_sizes)
 
         # Compile training stages.
