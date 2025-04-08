@@ -137,34 +137,101 @@ class DPF(nn.Module):
         """
         Normalizes particle poses and augments with cosine and sine of orientation.
         particles: [B, N, 3]
-        means['s'] and stds['s'] are assumed to be tensors or convertible arrays.
+        means['s'] and stds['s'] are assumed to be tensors or convertible arrays with shape [1, 1, 3].
         """
-        # Assume means['s'] and stds['s'] have shape [B, 3] and we unsqueeze to match.
-        means_s = means['s'].unsqueeze(1)
-        stds_s = stds['s'].unsqueeze(1)
-        norm_pos = (particles[:, :, :2] - means_s[:, :, :2]) / stds_s[:, :, :2]
+        # means['s'] has shape [1, 1, 3]
+        # stds['s'] has shape [1, 1, 3]
+
+        # Slice means and stds to get the x, y components (shape [1, 1, 2])
+        means_xy = means['s'][:, :, :2]
+        stds_xy = stds['s'][:, :, :2]
+
+        # Slice particles to get x, y components (shape [B, N, 2])
+        particles_xy = particles[:, :, :2]
+
+        # Normalize position. Broadcasting works: [B, N, 2] op [1, 1, 2] -> [B, N, 2]
+        norm_pos = (particles_xy - means_xy) / stds_xy
+
+        # Get orientation components
         cos_theta = torch.cos(particles[:, :, 2:3])
         sin_theta = torch.sin(particles[:, :, 2:3])
+
+        # Concatenate: [B, N, 2] + [B, N, 1] + [B, N, 1] -> [B, N, 4]
         return torch.cat([norm_pos, cos_theta, sin_theta], dim=-1)
+
 
     def propose_particles(self, encoding, num_particles, state_mins, state_maxs):
         """
-        Proposes new particles from an image encoding.
-        encoding: [B, 128]
-        state_mins/state_maxs: lists or arrays of length 3.
+        Proposes new particles from an image encoding using a learned proposer network.
+
+        Args:
+            encoding (torch.Tensor): Image encodings, shape [B, encoding_dim].
+            num_particles (int): Number of particles to propose per batch item.
+            state_mins (list/np.array/torch.Tensor): Minimum values for state dimensions [x, y, theta].
+            state_maxs (list/np.array/torch.Tensor): Maximum values for state dimensions [x, y, theta].
+
+        Returns:
+            torch.Tensor: Proposed particle states, shape [B, num_particles, 3].
         """
         B = encoding.size(0)
-        # Duplicate encoding for each particle.
+        device = encoding.device
+        dtype = encoding.dtype
+
+        # --- Handle empty batch or zero particles ---
+        if B == 0 or num_particles == 0:
+            # Return an empty tensor with the correct final dimension (state_dim = 3)
+            return torch.empty((B, num_particles, 3), dtype=dtype, device=device) # Assuming state_dim is 3
+
+        # --- Ensure particle_proposer exists ---
+        if not hasattr(self, 'particle_proposer') or self.particle_proposer is None:
+            raise RuntimeError("Particle proposer module (self.particle_proposer) is not defined or initialized.")
+
+        # --- Duplicate encoding for each particle ---
+        # tf.tile(encoding[:, tf.newaxis, :], [1, num_particles, 1]) -> torch equivalent
+        # Add dimension: [B, encoding_dim] -> [B, 1, encoding_dim]
+        # Expand: [B, 1, encoding_dim] -> [B, num_particles, encoding_dim]
         encoding_dup = encoding.unsqueeze(1).expand(-1, num_particles, -1)
-        inp_flat = encoding_dup.contiguous().view(B * num_particles, -1)
-        proposed = self.particle_proposer(inp_flat).view(B, num_particles, 4)
-        # Transform the outputs to valid state values.
-        state_mins = torch.tensor(state_mins, dtype=proposed.dtype, device=proposed.device)
-        state_maxs = torch.tensor(state_maxs, dtype=proposed.dtype, device=proposed.device)
-        part0 = proposed[:, :, 0:1] * ((state_maxs[0] - state_mins[0]) / 2.0) + ((state_maxs[0] + state_mins[0]) / 2.0)
-        part1 = proposed[:, :, 1:2] * ((state_maxs[1] - state_mins[1]) / 2.0) + ((state_maxs[1] + state_mins[1]) / 2.0)
-        part2 = atan2(proposed[:, :, 2:3], proposed[:, :, 3:4])
-        return torch.cat([part0, part1, part2], dim=-1)
+
+        # --- Apply proposer network (equivalent to snt.BatchApply) ---
+        # Reshape for MLP: [B, num_particles, encoding_dim] -> [B * num_particles, encoding_dim]
+        inp_flat = encoding_dup.reshape(B * num_particles, -1)
+        # Apply the proposer network
+        proposed_raw = self.particle_proposer(inp_flat) # Expected output shape: [B * num_particles, 4]
+        # Reshape back: [B * num_particles, 4] -> [B, num_particles, 4]
+        proposed_raw = proposed_raw.view(B, num_particles, 4)
+
+        # --- Transform the outputs to valid state values ---
+        # Convert state bounds to tensors on the correct device and dtype
+        if not torch.is_tensor(state_mins):
+            state_mins = torch.tensor(state_mins, dtype=dtype, device=device)
+        if not torch.is_tensor(state_maxs):
+            state_maxs = torch.tensor(state_maxs, dtype=dtype, device=device)
+
+        # Ensure state bounds have at least 2 elements for x and y
+        if len(state_mins) < 2 or len(state_maxs) < 2:
+            raise ValueError(f"state_mins/state_maxs must have at least 2 elements for x, y. Got lengths {len(state_mins)}, {len(state_maxs)}")
+
+        # Scale and shift the first output (index 0) for x-coordinate
+        range_x = state_maxs[0] - state_mins[0]
+        mid_x = (state_maxs[0] + state_mins[0]) / 2.0
+        part0 = proposed_raw[:, :, 0:1] * (range_x / 2.0) + mid_x
+
+        # Scale and shift the second output (index 1) for y-coordinate
+        range_y = state_maxs[1] - state_mins[1]
+        mid_y = (state_maxs[1] + state_mins[1]) / 2.0
+        part1 = proposed_raw[:, :, 1:2] * (range_y / 2.0) + mid_y
+
+        # Compute angle (theta) using atan2 from the third and fourth outputs (indices 2, 3)
+        # The provided method_utils.atan2(x, y) calls torch.atan2(y, x).
+        # So, the first argument is x, the second is y.
+        part2 = atan2(proposed_raw[:, :, 2:3], proposed_raw[:, :, 3:4])
+
+        # --- Concatenate results ---
+        # tf.concat([...], axis=2) -> torch.cat([...], dim=-1)
+        proposed_particles = torch.cat([part0, part1, part2], dim=-1) # Shape: [B, num_particles, 3]
+
+        return proposed_particles
+
 
     def motion_update(self, actions, particles, means, stds, state_step_sizes, stop_sampling_gradient=False):
         """
@@ -174,7 +241,7 @@ class DPF(nn.Module):
         state_step_sizes: list or array of length 3.
         """
         # Expand actions to match particles.
-        print(actions.shape)
+        # print(actions.shape)
         actions = torch.tensor(actions)
         actions_exp = actions.unsqueeze(1)  # [B, 1, 3]
         std_a = stds['a']
@@ -275,7 +342,11 @@ class DPF(nn.Module):
         # Process each time step.
         for i in range(1, T):
             # Determine numbers of proposed/resampled particles.
-            num_proposed_float = round((self.propose_ratio ** i) * self.num_particles)
+            # print("i: ", i)
+            # print("self.propose_ratio: ", self.propose_ratio)
+            # print("self.num_particles: ", self.num_particles)
+            # print( round((self.propose_ratio ** float(i)) * float(self.num_particles)))
+            num_proposed_float = round((self.propose_ratio ** float(i)) * float(self.num_particles))
             num_proposed = int(num_proposed_float)
             num_resampled = self.num_particles - num_proposed
 
@@ -368,7 +439,7 @@ class DPF(nn.Module):
                                                 means, stds, state_step_sizes)
             std_val = 0.01
             sq_distance = compute_sq_distance(motion_samples, batch['s'][:, 1:2], state_step_sizes)
-            activations = (1 / self.num_particles) / torch.sqrt(2 * np.pi * std_val ** 2) * \
+            activations = (1 / self.num_particles) / torch.sqrt(torch.tensor(2 * np.pi * std_val ** 2)) * \
                           torch.exp(-sq_distance / (2.0 * std_val ** 2))
             loss = (-torch.log(1e-16 + torch.sum(activations, dim=-1))).mean()
             return loss

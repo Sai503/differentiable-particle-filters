@@ -185,23 +185,47 @@ def noisify_data_condition(data, condition):
 def noisyfy_data(data, odom_noise_factor=1.0, img_noise_factor=1.0, img_random_shift=True):
     print("noisyfying data ...")
     new_data = {}
-    new_data['s'] = data['s']
-    # Multiply actions by noise factor using torch.normal.
-    new_data['a'] = data['a'] * torch.normal(mean=1.0, std=0.1 * odom_noise_factor, size=data['a'].shape)
-    # Create new observations by cropping and adding noise.
-    new_o = torch.zeros(data['o'].shape)
-    B, T, H, W, C = data['o'].shape
-    for i in range(B):
-        for j in range(T):
-            if img_random_shift:
-                offsets = torch.randint(0, 9, (2,))
-            else:
-                offsets = torch.tensor([4, 4])
-            new_o[i, j] = data['o'][i, j, offsets[0]:offsets[0]+24, offsets[1]:offsets[1]+24, :]
-    new_o = new_o + torch.normal(mean=0.0, std=20 * img_noise_factor, size=new_o.shape)
-    new_data['o'] = new_o
-    return new_data
+    # Ensure keys exist and clone tensors to avoid modifying original data
+    if 's' in data:
+        new_data['s'] = data['s'].clone()
+    if 'a' in data:
+        device = data['a'].device
+        noise_a = torch.normal(mean=1.0, std=0.1 * odom_noise_factor, size=data['a'].shape, device=device, dtype=data['a'].dtype)
+        new_data['a'] = data['a'] * noise_a
+    if 'o' in data:
+        B, T, H, W, C = data['o'].shape # Original shape (e.g., B, T, 32, 32, 3)
+        target_H, target_W = 24, 24     # Target cropped shape
+        device_o = data['o'].device
+        dtype_o = data['o'].dtype
 
+        # Initialize new_o with the TARGET shape [B, T, 24, 24, C]
+        new_o = torch.zeros(B, T, target_H, target_W, C, dtype=dtype_o, device=device_o)
+
+        max_offset_H = H - target_H # e.g., 32 - 24 = 8
+        max_offset_W = W - target_W # e.g., 32 - 24 = 8
+
+        for i in range(B):
+            for j in range(T):
+                if img_random_shift:
+                    # Ensure offset doesn't go out of bounds for cropping
+                    offset_h = torch.randint(0, max_offset_H + 1, (1,), device=device_o).item()
+                    offset_w = torch.randint(0, max_offset_W + 1, (1,), device=device_o).item()
+                else:
+                    # Center crop: start at (H-target_H)/2, (W-target_W)/2
+                    offset_h = (H - target_H) // 2 # e.g., (32-24)//2 = 4
+                    offset_w = (W - target_W) // 2 # e.g., (32-24)//2 = 4
+
+                # Crop the original image and assign to the correctly sized new_o slice
+                new_o[i, j] = data['o'][i, j, offset_h:offset_h + target_H, offset_w:offset_w + target_W, :]
+
+        # Add noise to the cropped image tensor
+        noise_o = torch.normal(mean=0.0, std=20 * img_noise_factor, size=new_o.shape, device=device_o, dtype=dtype_o)
+        new_o = new_o + noise_o
+        new_data['o'] = new_o
+    else:
+        print("Warning: Key 'o' not found in data during noisyfy_data.")
+
+    return new_data
 
 def make_batch_iterator(data, batch_size=32, seq_len=10):
     # Generator that yields a batch from random episodes and start steps.
