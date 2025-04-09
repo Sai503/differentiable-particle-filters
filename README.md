@@ -69,3 +69,33 @@ This command will first train the different models (motion model, observation li
 As next steps, you can play around with the hyperparameters in `utils/exp_utils.py`, go through the differentiable particle filter code in `methods/dpf.py`, and run other experiments, e.g. applying the filter to the KITTI visual odometry task by running the following command (if your computer has enough memory :D).
 
     cd experiments; python3 cross_validation_kitti.py; cd ..
+
+
+## Training Stages
+Based on the provided dpf.py code, the training stages are defined within the compile_training_stages method. Here they are:
+
+train_odom:
+Condition: Only active if self.learn_odom is True during initialization.
+Purpose: Trains the learned odometry transition model (self.mo_transition_model) to predict the next state based on the current state and noisy action. Uses MSE loss between predicted next state and true next state.
+Iterators: Uses 'train1' and 'val1' (sequence length 2).
+
+train_motion_sampling:
+Condition: Always active.
+Purpose: Trains the motion noise generator (self.mo_noise_generator) to produce appropriate noise for the motion update. Uses a kernel-based negative log-likelihood loss comparing the distribution of motion-updated particles to the true next state.
+Iterators: Uses 'train1' and 'val1' (sequence length 2).
+
+train_measurement_model:
+Condition: Always active.
+Purpose: Trains the observation encoder (self.encoder_conv, self.encoder_linear) and the observation likelihood estimator (self.obs_like_estimator). Uses a contrastive loss: it maximizes the likelihood for correct observation-state pairs (diagonal elements) and minimizes it for incorrect pairs (off-diagonal elements).
+Iterators: Uses 'train1' and 'val1' (sequence length 2, although only the first step's observation/state are used in the loss).
+
+train_particle_proposer:
+Condition: Only active if self.use_proposer is True during initialization.
+Purpose: Trains the particle proposer network (self.particle_proposer) to generate particles close to the true state given an observation. Uses a kernel-based negative log-likelihood loss comparing the distribution of proposed particles to the true state.
+Iterators: Uses 'train1' and 'val1' (sequence length 2, only first step used).
+
+train_e2e:
+Condition: Always active.
+Purpose: Trains the entire model end-to-end. It runs the full particle filter process (connect_modules) and calculates a kernel-based negative log-likelihood loss comparing the weighted particle cloud at each time step to the true state at that time step. It also monitors the MSE loss at the final time step.
+Iterators: Uses 'train' and 'val' (full sequence length).
+The fit method then executes these stages sequentially based on the train_individually and train_e2e flags passed to it, forming a training curriculum.

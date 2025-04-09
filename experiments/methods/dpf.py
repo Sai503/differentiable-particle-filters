@@ -68,7 +68,7 @@ class DPF(nn.Module):
         # We assume input images are 24x24 with 3 channels.
         # Note: In PyTorch image tensors are [B, C, H, W].
         self.encoder_conv = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1),  # 24 -> 12
+            nn.Conv2d(24, 16, kernel_size=3, stride=2, padding=1),  # 24 -> 12
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),  # 12 -> 6
             nn.ReLU(),
@@ -745,7 +745,6 @@ class DPF(nn.Module):
         self.state_maxs_t = torch.tensor(self.state_maxs, dtype=dtype, device=device)
         print(f"Converted statistics to tensors on device {device}")
 
-
     def fit(self, data, model_path, train_individually, train_e2e, split_ratio,
             seq_len, batch_size, epoch_length, num_epochs, patience,
             learning_rate, dropout_keep_ratio, num_particles, particle_std,
@@ -851,6 +850,19 @@ class DPF(nn.Module):
             train_iter_name = iter_names.get('train', 'train') # Default to 'train'
             val_iter_name = iter_names.get('val', 'val')       # Default to 'val'
 
+            # --- Load pre-trained model if available ---
+            pretrained_model_path = os.path.join(model_path, f'best_val_{stage}.pth')
+            if os.path.exists(pretrained_model_path):
+                try:
+                    self.load_state_dict(torch.load(pretrained_model_path, map_location=device))
+                    print(f"  Loaded pre-trained model for {stage} from: {pretrained_model_path}")
+                    # skip to next stage
+                    continue
+                except RuntimeError as e:
+                    print(f"  Error loading pre-trained model for {stage}: {e}. Training from current state.")
+            else:
+                print(f"  No pre-trained model found for {stage}. Training from current state.")
+
             while epoch < num_epochs and (epoch - best_stage_epoch) < patience:
                 epoch_log = {'train': {'loss': [], 'monitor': []}, 'val': {'loss': [], 'monitor': []}}
                 for phase in ['train', 'val']:
@@ -891,10 +903,10 @@ class DPF(nn.Module):
 
 
                 # Calculate average losses for the epoch
-                avg_train_loss = np.mean(epoch_log['train']['loss'])
-                avg_val_loss = np.mean(epoch_log['val']['loss'])
-                avg_train_monitor = np.mean(epoch_log['train']['monitor'])
-                avg_val_monitor = np.mean(epoch_log['val']['monitor'])
+                avg_train_loss = np.mean(epoch_log['train']['loss']) if epoch_log['train']['loss'] else 0 # Handle empty lists
+                avg_val_loss = np.mean(epoch_log['val']['loss']) if epoch_log['val']['loss'] else 0
+                avg_train_monitor = np.mean(epoch_log['train']['monitor']) if epoch_log['train']['monitor'] else 0
+                avg_val_monitor = np.mean(epoch_log['val']['monitor']) if epoch_log['val']['monitor'] else 0
 
                 # Log epoch results
                 log[stage]['train']['loss'].append(avg_train_loss)
@@ -951,7 +963,7 @@ class DPF(nn.Module):
              self.load_state_dict(torch.load(save_path_overall, map_location=device))
 
         return log # Return training log
-
+  
     # === Plotting functions (adapted to PyTorch) ===
     # IMPORTANT: Ensure tensors are moved to CPU and converted to NumPy for plotting
 
