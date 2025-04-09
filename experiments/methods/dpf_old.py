@@ -3,7 +3,7 @@ import numpy as np
 import sonnet as snt
 import tensorflow as tf
 import matplotlib.pyplot as plt
-
+# old tensorflow version for reference only
 from utils.data_utils import wrap_angle, compute_staticstics, split_data, make_batch_iterator, make_repeating_batch_iterator
 from utils.method_utils import atan2, compute_sq_distance
 from utils.plotting_utils import plot_maze, show_pause
