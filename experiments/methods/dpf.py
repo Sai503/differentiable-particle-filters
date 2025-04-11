@@ -77,8 +77,8 @@ class DPF(nn.Module):
         )
         self.encoder_flatten = nn.Flatten()
         self.encoder_dropout = nn.Dropout(p=1 - self.dropout_keep_prob)
-        # 64 filters * 3x3 output = 576 features.
-        self.encoder_linear = nn.Linear(576, 128)
+        # dropout output = 32x192
+        self.encoder_linear = nn.Linear(192, 128)
 
         # --- Observation likelihood estimator ---
         # Input: concatenation of the 128–dim image encoding and 4–dim transformed state.
