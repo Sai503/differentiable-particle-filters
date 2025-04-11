@@ -70,5 +70,5 @@ def test_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp')
 
 if __name__ == '__main__':
     # Example usage: train first, then test
-    train_dpf(plot=False) # Set plot=True if you want plots during training
+    train_dpf(plot=True) # Set plot=True if you want plots during training
     test_dpf()
