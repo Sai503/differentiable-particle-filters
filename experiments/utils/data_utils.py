@@ -1,3 +1,5 @@
+# In c:\Users\sjanyavu\Desktop\differentiable-particle-filters\experiments\utils\data_utils.py
+
 import os
 import math
 import torch
@@ -124,14 +126,17 @@ def load_data(data_path='../data/100s', filename='nav01_train', steps_per_episod
             'a': torch.cat([rel_d_x, rel_d_y, d_theta], dim=-1)} # Action taken at t
 
 
+# MODIFIED compute_statistics function:
 def compute_statistics(data):
     """
     Computes statistics (mean, std, step_sizes, min, max) from training data.
+    Calculates PER-CHANNEL statistics for observations ('o').
     Args:
         data (dict): Dictionary containing training data as PyTorch tensors ('o', 's', 'a').
     Returns:
         tuple: Contains (means, stds, state_step_sizes, state_mins, state_maxs)
                where means and stds are dictionaries of NumPy arrays, and the rest are NumPy arrays.
+               means['o'] and stds['o'] will have shape (C,).
     """
     means_t = {}
     stds_t = {}
@@ -145,56 +150,70 @@ def compute_statistics(data):
             print(f"Warning: Key '{key}' not found in data for statistics calculation.")
             continue
 
-        # Compute means over the first two dimensions (episodes and time).
-        current_data = data[key]
-        means_t[key] = torch.mean(current_data.float(), dim=(0, 1), keepdim=True) # Ensure float
+        current_data = data[key].float() # Ensure float type
 
-        if key == 's':
-            # state_dim = current_data.shape[-1]
-            if current_data.shape[-1] >= 3: # Check if state dim includes orientation
-                 means_t[key][..., 2] = 0  # leave orientation mean at 0
-        if key == 'a':
+        if key == 'o':
+            # --- Observation Statistics (Per-Channel) ---
+            if current_data.dim() != 5:
+                raise ValueError(f"Observation data 'o' must have 5 dimensions [B, T, H, W, C] or [B, T, C, H, W]. Got {current_data.dim()}")
+
+            # Infer channel dimension C (assuming it's the smallest of the last 3 dims, or last dim)
+            shape = current_data.shape
+            potential_c_dim_index = -1 # Default to last dimension
+            last_3_dims = shape[-3:]
+            if len(last_3_dims) == 3:
+                 min_dim_size = min(last_3_dims)
+                 min_dim_indices = [i for i, size in enumerate(last_3_dims) if size == min_dim_size]
+                 if len(min_dim_indices) == 1: # If unique smallest dimension among last 3
+                     potential_c_dim_index = len(shape) - 3 + min_dim_indices[0]
+                 else: # Ambiguous, default to last
+                     potential_c_dim_index = -1
+            else: # Should not happen if dim == 5
+                 potential_c_dim_index = -1
+
+            # Determine dimensions to reduce (all except the channel dimension)
+            dims_to_reduce = list(range(current_data.dim()))
+            # Convert negative index to positive if needed
+            positive_c_dim_index = potential_c_dim_index % current_data.dim()
+            dims_to_reduce.pop(positive_c_dim_index)
+            dims_to_reduce = tuple(dims_to_reduce)
+
+            print(f"DEBUG compute_stats['o']: shape={shape}, inferred C dim index={positive_c_dim_index}, reducing over dims={dims_to_reduce}")
+
+            # Calculate mean per channel (result shape [C])
+            means_t[key] = torch.mean(current_data, dim=dims_to_reduce)
+            # Calculate std per channel (result shape [C])
+            stds_t[key] = torch.std(current_data, dim=dims_to_reduce)
+
+        elif key == 's':
+            # --- State Statistics ---
+            # Mean over B, T (keepdim for broadcasting later if needed, but we convert to numpy)
+            means_t[key] = torch.mean(current_data, dim=(0, 1)) # Shape [3]
+            if means_t[key].shape[0] >= 3: # Check if state dim includes orientation
+                 means_t[key][2] = 0  # leave orientation mean at 0
+
+            # Std over B, T (keepdim for broadcasting later if needed)
+            stds_t[key] = torch.std(current_data, dim=(0, 1)) # Shape [3]
+            # Average std for x, y components if state dim >= 2
+            if stds_t[key].shape[0] >= 2:
+                 stds_t[key][:2] = torch.mean(stds_t[key][:2])
+
+        elif key == 'a':
+            # --- Action Statistics ---
+            # Mean over B, T (keepdim for broadcasting later if needed)
+            means_t[key] = torch.mean(current_data, dim=(0, 1)) # Shape [3]
             means_t[key] = means_t[key] * 0  # set action mean to zero
 
-        # Compute std over all but the last dimension(s).
-        # For images ('o'), compute std per channel across B, T, H, W
-        if key == 'o':
-            # Input shape: [B, T, H, W, C] or [B, T, C, H, W]
-            if current_data.dim() == 5:
-                if current_data.shape[-1] < current_data.shape[2]: # Likely [B, T, H, W, C]
-                    channel_dim = -1
-                    dims_to_reduce = (0, 1, 2, 3)
-                else: # Likely [B, T, C, H, W]
-                    channel_dim = 2
-                    dims_to_reduce = (0, 1, 3, 4)
-
-                # Calculate std per channel
-                num_elements = np.prod([current_data.shape[d] for d in dims_to_reduce])
-                # Reshape to [C, -1] to calculate std per channel easily
-                data_reshaped = current_data.movedim(channel_dim, 0).reshape(current_data.shape[channel_dim], -1)
-                stds_t[key] = torch.std(data_reshaped.float(), dim=1) # Std per channel [C]
-                # Reshape stds back to broadcast correctly with means_t[key]
-                # means_t[key] is likely [1, 1, 1, 1, C] or [1, 1, C, 1, 1]
-                std_shape = [1] * current_data.dim()
-                std_shape[channel_dim] = current_data.shape[channel_dim]
-                stds_t[key] = stds_t[key].view(std_shape)
-
-            else: # Fallback for unexpected observation shape
-                 print(f"Warning: Unexpected shape for data['o']: {current_data.shape}. Calculating std over all leading dims.")
-                 dims = tuple(range(current_data.dim() - 1))
-                 stds_t[key] = torch.std(current_data.float() - means_t[key], dim=dims, keepdim=True)
-
-        else: # For 's' and 'a'
-            dims = tuple(range(current_data.dim() - 1))
-            stds_t[key] = torch.std(current_data.float() - means_t[key], dim=dims, keepdim=True)
-            # Average std for x, y components if state/action dim >= 2
-            if current_data.shape[-1] >= 2:
-                 stds_t[key][..., :2] = torch.mean(stds_t[key][..., :2])
+            # Std over B, T (keepdim for broadcasting later if needed)
+            stds_t[key] = torch.std(current_data, dim=(0, 1)) # Shape [3]
+            # Average std for x, y components if action dim >= 2
+            if stds_t[key].shape[0] >= 2:
+                 stds_t[key][:2] = torch.mean(stds_t[key][:2])
 
 
     # --- Calculate State Step Sizes, Mins, Maxs (using PyTorch) ---
     if 's' in data:
-        state_data = data['s']
+        state_data = data['s'].float() # Ensure float
         state_dim = state_data.shape[-1]
         for i in range(state_dim):
             # Difference between consecutive steps
@@ -209,13 +228,13 @@ def compute_statistics(data):
             state_step_sizes_t[0] = avg_xy_step
             state_step_sizes_t[1] = avg_xy_step
 
-        state_step_sizes_t = torch.stack(state_step_sizes_t)
+        state_step_sizes_t = torch.stack(state_step_sizes_t) # Shape [3]
 
         for i in range(state_dim):
             state_mins_t.append(torch.min(state_data[..., i]))
             state_maxs_t.append(torch.max(state_data[..., i]))
-        state_mins_t = torch.stack(state_mins_t)
-        state_maxs_t = torch.stack(state_maxs_t)
+        state_mins_t = torch.stack(state_mins_t) # Shape [3]
+        state_maxs_t = torch.stack(state_maxs_t) # Shape [3]
     else: # Handle case where 's' is missing
         print("Warning: Key 's' not found in data for statistics calculation. Step sizes, mins, maxs will be empty.")
         state_step_sizes_t = torch.empty(0)
@@ -224,14 +243,25 @@ def compute_statistics(data):
 
 
     # --- Convert to NumPy for Return ---
+    # Resulting means['o'] and stds['o'] will have shape (C,)
+    # Resulting means/stds for 's' and 'a' will have shape (3,)
     means_np = {k: v.cpu().numpy() for k, v in means_t.items()}
     stds_np = {k: v.cpu().numpy() for k, v in stds_t.items()}
-    state_step_sizes_np = state_step_sizes_t.cpu().numpy()
-    state_mins_np = state_mins_t.cpu().numpy()
-    state_maxs_np = state_maxs_t.cpu().numpy()
+    state_step_sizes_np = state_step_sizes_t.cpu().numpy() # Shape (3,)
+    state_mins_np = state_mins_t.cpu().numpy() # Shape (3,)
+    state_maxs_np = state_maxs_t.cpu().numpy() # Shape (3,)
+
+    # --- Debug Print Shapes ---
+    print("DEBUG compute_stats: Final NumPy shapes:")
+    for k in means_np: print(f"  means['{k}']: {means_np[k].shape}")
+    for k in stds_np: print(f"  stds['{k}']: {stds_np[k].shape}")
+    print(f"  state_step_sizes: {state_step_sizes_np.shape}")
+    print(f"  state_mins: {state_mins_np.shape}")
+    print(f"  state_maxs: {state_maxs_np.shape}")
 
     return means_np, stds_np, state_step_sizes_np, state_mins_np, state_maxs_np
 
+# --- (Rest of data_utils.py remains the same) ---
 
 def split_data(data, ratio=0.8, categories=['train', 'val']):
     print(f"Splitting data. Input episodes: {data['s'].shape[0]}")
@@ -358,14 +388,18 @@ def noisyfy_data(data, odom_noise_factor=1.0, img_noise_factor=1.0, img_random_s
         # Infer C, H, W assuming C is the smaller dimension (<=10)
         shape = obs_data.shape
         potential_c_dim = -1
-        if shape[2] <= 10 and shape[2] < shape[3] and shape[2] < shape[4]:
-             potential_c_dim = 2
-        elif shape[-1] <= 10 and shape[-1] < shape[2] and shape[-1] < shape[3]:
-             potential_c_dim = -1 # Or 4
-        else:
-             # Fallback or raise error if channel dim is ambiguous
-             print(f"Warning: Cannot reliably determine channel dimension for observation shape {shape}. Assuming channels last.")
-             potential_c_dim = -1
+        if len(shape) == 5: # Check if 5D
+            if shape[2] <= 10 and shape[2] < shape[3] and shape[2] < shape[4]:
+                 potential_c_dim = 2
+            elif shape[-1] <= 10 and shape[-1] < shape[2] and shape[-1] < shape[3]:
+                 potential_c_dim = -1 # Or 4
+            else:
+                 # Fallback or raise error if channel dim is ambiguous
+                 print(f"Warning: Cannot reliably determine channel dimension for observation shape {shape}. Assuming channels last.")
+                 potential_c_dim = -1
+        else: # Should not happen based on earlier check, but handle defensively
+             raise ValueError(f"Observation data 'o' must have 5 dimensions. Got {obs_data.dim()}")
+
 
         if potential_c_dim == 2: # Input is [B, T, C, H, W]
              print("Permuting observations from [B, T, C, H, W] to [B, T, H, W, C] for cropping.")
@@ -437,7 +471,7 @@ def make_batch_iterator(data, batch_size=32, seq_len=10):
     while True: # Keep yielding batches indefinitely
         # Sample random episodes and start steps for the batch
         episodes = torch.randint(0, num_episodes, (batch_size,))
-        start_steps = torch.randint(0, max_start_step, (batch_size,)) # Use max_start_step
+        start_steps = torch.randint(0, max_start_step + 1, (batch_size,)) # Use max_start_step + 1 for upper bound
 
         batches = {}
         for k in data.keys():
@@ -475,7 +509,7 @@ def make_repeating_batch_iterator(data, epoch_len, batch_size=32, seq_len=10):
 
     # Pre-sample indices for the entire epoch length
     repeating_episodes = torch.randint(0, num_episodes, (epoch_len, batch_size))
-    repeating_start_steps = torch.randint(0, max_start_step, (epoch_len, batch_size))
+    repeating_start_steps = torch.randint(0, max_start_step + 1, (epoch_len, batch_size)) # Use max_start_step + 1
 
     current_step = 0
     while True: # Loop indefinitely over epochs
@@ -510,7 +544,7 @@ def make_complete_batch_iterator(data, batch_size=1000, seq_len=10):
         return
 
     # Create a list of all possible (episode, start_step) indices
-    batch_indices = [(i, j) for i in range(num_episodes) for j in range(num_start_steps)]
+    batch_indices = [(i, j) for i in range(num_episodes) for j in range(num_start_steps + 1)] # Include last possible start step
     # Optional: Shuffle indices for randomness within an epoch
     # random.shuffle(batch_indices) # Use Python's random if needed
 

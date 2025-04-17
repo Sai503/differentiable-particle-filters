@@ -69,7 +69,7 @@ class DPF(nn.Module):
         # We assume input images are 24x24 with 3 channels.
         # Note: In PyTorch image tensors are [B, C, H, W].
         self.encoder_conv = nn.Sequential(
-            nn.Conv2d(24, 16, kernel_size=3, stride=2, padding=1),  # 24
+            nn.Conv2d(4, 16, kernel_size=3, stride=2, padding=1),  # 24
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),  # 12 -> 6
             nn.ReLU(),
@@ -139,7 +139,7 @@ class DPF(nn.Module):
            Expected to be on the correct device already.
         """
         # Ensure correct shape: [B, C, H, W]
-        if o.dim() == 4 and o.size(-1) == 3:
+        if o.dim() == 4 and o.size(-1) == 4:
             # Make sure permutation happens on the correct device
             o = o.permute(0, 3, 1, 2).contiguous() # Add contiguous for efficiency
         # Ensure float type
@@ -649,8 +649,12 @@ class DPF(nn.Module):
             # Encode the first observation image (on device)
             o_first = o_batch[:, 0] # [B, H, W, C] or [B, C, H, W]
             # Normalize obs before encoding
-            o_first_norm = (o_first - self.means_t['o'].unsqueeze(0)) / (self.stds_t['o'].unsqueeze(0) + 1e-8)
+            # print(o_first.shape)
+            # print(self.means_t['o'].shape)
+            o_first_norm = (o_first - self.means_t['o']) / (self.stds_t['o'] + 1e-8)
+            # print(o_first_norm.shape)
             encoding = self.forward_encoder(o_first_norm) # [B, 128]
+            # print(encoding.shape)
 
             # Expand encoding to match particle structure: [B, 1, 128] -> [B, B, 128]
             encoding_expanded = encoding.unsqueeze(1).expand(B, B, -1)
@@ -851,21 +855,75 @@ class DPF(nn.Module):
     def _stats_to_tensors(self, device):
         """Converts loaded numpy statistics to tensors on the specified device."""
         dtype = torch.float32 # Default dtype
+        # Determine number of observation channels C from the data if possible,
+        # or hardcode if known. From error [..., 4], C=4 seems likely.
+        # Let's try to infer from the loaded numpy array shape, falling back to 4.
+        try:
+            # Attempt to get C from the last dimension of the squeezed numpy array
+            num_obs_channels = np.asarray(self.means['o']).squeeze().shape[-1]
+            if num_obs_channels <= 1: # Squeeze might remove last dim if C=1
+                 num_obs_channels = np.asarray(self.means['o']).squeeze().size
+            print(f"DEBUG: Inferred num_obs_channels = {num_obs_channels}")
+            if num_obs_channels not in [3, 4]: # Plausibility check
+                 print(f"Warning: Inferred num_obs_channels ({num_obs_channels}) seems unusual. Double-check data.")
+                 # Fallback or raise error? Let's fallback to 4 based on error msg.
+                 # num_obs_channels = 4
+        except Exception as e:
+            print(f"Warning: Could not infer num_obs_channels from self.means['o']. Defaulting to 4. Error: {e}")
+            num_obs_channels = 4 # Default based on previous error [..., 4]
 
-        # Convert means and stds (which are dictionaries of arrays)
-        # Ensure they have the expected batch/particle dimensions for broadcasting
-        self.means_t = {k: torch.tensor(v, dtype=dtype, device=device).unsqueeze(0).unsqueeze(0) if k == 's' else torch.tensor(v, dtype=dtype, device=device) for k, v in self.means.items()}
-        self.stds_t = {k: torch.tensor(v, dtype=dtype, device=device).unsqueeze(0).unsqueeze(0) if k == 's' else torch.tensor(v, dtype=dtype, device=device) for k, v in self.stds.items()}
-        # Add action dim expansion for stds['a']
-        # print(self.stds_t['a'].shape)
-        # if 'a' in self.stds_t:
-        #     self.stds_t['a'] = self.stds_t['a'].unsqueeze(0).unsqueeze(0) # Shape [1, 1, 3]
-        # print(self.stds_t['a'].shape)
+        # --- Convert means ---
+        self.means_t = {}
+        for k, v_np in self.means.items():
+            # Squeeze potential extra dimensions from numpy array before converting
+            v_squeezed_np = np.asarray(v_np).squeeze()
+            v_tensor = torch.tensor(v_squeezed_np, dtype=dtype, device=device)
+
+            if k == 's': # State: Expect [1, 1, 3]
+                if v_tensor.numel() != 3:
+                    raise ValueError(f"Expected means['s'] to have 3 elements, but got shape {np.asarray(v_np).shape} -> {v_tensor.shape}")
+                self.means_t[k] = v_tensor.view(1, 1, 3)
+            elif k == 'o': # Observation: Expect [C]
+                if v_tensor.numel() != num_obs_channels:
+                     raise ValueError(f"Expected means['o'] to have {num_obs_channels} elements, but got shape {np.asarray(v_np).shape} -> {v_tensor.shape}")
+                # Reshape to [C] for direct broadcasting with [B, H, W, C]
+                self.means_t[k] = v_tensor.view(num_obs_channels)
+            else: # Others (e.g., 'a'): Keep original squeezed tensor shape
+                self.means_t[k] = v_tensor
+
+        # --- Convert stds ---
+        self.stds_t = {}
+        for k, v_np in self.stds.items():
+            # Squeeze potential extra dimensions from numpy array before converting
+            v_squeezed_np = np.asarray(v_np).squeeze()
+            v_tensor = torch.tensor(v_squeezed_np, dtype=dtype, device=device)
+
+            if k == 's': # State: Expect [1, 1, 3]
+                if v_tensor.numel() != 3:
+                    raise ValueError(f"Expected stds['s'] to have 3 elements, but got shape {np.asarray(v_np).shape} -> {v_tensor.shape}")
+                self.stds_t[k] = v_tensor.view(1, 1, 3)
+            elif k == 'a': # Action: Expect [1, 1, 3] for motion_update broadcasting
+                 if v_tensor.numel() != 3:
+                      raise ValueError(f"Expected stds['a'] to have 3 elements, but got shape {np.asarray(v_np).shape} -> {v_tensor.shape}")
+                 self.stds_t[k] = v_tensor.view(1, 1, 3) # Use view to force the shape [1, 1, 3]
+            elif k == 'o': # Observation: Expect [C]
+                if v_tensor.numel() != num_obs_channels:
+                     raise ValueError(f"Expected stds['o'] to have {num_obs_channels} elements, but got shape {np.asarray(v_np).shape} -> {v_tensor.shape}")
+                # Reshape to [C] for direct broadcasting with [B, H, W, C]
+                self.stds_t[k] = v_tensor.view(num_obs_channels)
+            else: # Others: Keep original squeezed tensor shape
+                self.stds_t[k] = v_tensor
+
         # Convert others (these are usually 1D arrays)
         self.state_step_sizes_t = torch.tensor(self.state_step_sizes, dtype=dtype, device=device)
         self.state_mins_t = torch.tensor(self.state_mins, dtype=dtype, device=device)
         self.state_maxs_t = torch.tensor(self.state_maxs, dtype=dtype, device=device)
         print(f"Converted statistics to tensors on device {device}")
+        # Add debug prints to confirm shapes
+        if 'o' in self.means_t: print(f"DEBUG: Final self.means_t['o'] shape: {self.means_t['o'].shape}") # Should print torch.Size([4])
+        if 'o' in self.stds_t: print(f"DEBUG: Final self.stds_t['o'] shape: {self.stds_t['o'].shape}") # Should print torch.Size([4])
+        if 'a' in self.stds_t: print(f"DEBUG: Final self.stds_t['a'] shape: {self.stds_t['a'].shape}") # Should print torch.Size([1, 1, 3])
+
 
 
     def fit(self, data, model_path, train_individually, train_e2e, split_ratio,
