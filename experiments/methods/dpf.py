@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import numpy as np
 import torch
@@ -68,7 +69,7 @@ class DPF(nn.Module):
         # We assume input images are 24x24 with 3 channels.
         # Note: In PyTorch image tensors are [B, C, H, W].
         self.encoder_conv = nn.Sequential(
-            nn.Conv2d(24, 16, kernel_size=3, stride=2, padding=1),  # 24 -> 12
+            nn.Conv2d(24, 16, kernel_size=3, stride=2, padding=1),  # 24
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),  # 12 -> 6
             nn.ReLU(),
@@ -76,9 +77,10 @@ class DPF(nn.Module):
             nn.ReLU()
         )
         self.encoder_flatten = nn.Flatten()
+        # Calculate flattened size: 64 channels * 3 height * 3 width
+        encoder_flat_size = 64 * 3 * 3
         self.encoder_dropout = nn.Dropout(p=1 - self.dropout_keep_prob)
-        # dropout output = 32x192
-        self.encoder_linear = nn.Linear(192, 128)
+        self.encoder_linear = nn.Linear(encoder_flat_size, 128) # Corrected input size
 
         # --- Observation likelihood estimator ---
         # Input: concatenation of the 128–dim image encoding and 4–dim transformed state.
@@ -133,10 +135,10 @@ class DPF(nn.Module):
     def forward_encoder(self, o):
         """
         Encodes images.
-        o: torch.Tensor of shape [B, 24, 24, 3] or [B, 3, 24, 24].
+        o: torch.Tensor of shape [B, H, W, C] or [B, C, H, W].
            Expected to be on the correct device already.
         """
-        # Ensure correct shape: [B, 3, 24, 24]
+        # Ensure correct shape: [B, C, H, W]
         if o.dim() == 4 and o.size(-1) == 3:
             # Make sure permutation happens on the correct device
             o = o.permute(0, 3, 1, 2).contiguous() # Add contiguous for efficiency
@@ -253,7 +255,8 @@ class DPF(nn.Module):
         part1 = proposed_raw[:, :, 1:2] * (range_y / 2.0) + mid_y
 
         # Compute angle (theta) using atan2 from the third and fourth outputs (indices 2, 3)
-        part2 = atan2(proposed_raw[:, :, 2:3], proposed_raw[:, :, 3:4]) # atan2 should handle tensors
+        # Use torch.atan2 which expects (y, x)
+        part2 = torch.atan2(proposed_raw[:, :, 2:3], proposed_raw[:, :, 3:4])
 
         # --- Concatenate results ---
         proposed_particles = torch.cat([part0, part1, part2], dim=-1) # Shape: [B, num_particles, 3]
@@ -311,7 +314,7 @@ class DPF(nn.Module):
             # if state_step_sizes.device != state_delta.device or state_step_sizes.dtype != state_delta.dtype:
             #      state_step_sizes = state_step_sizes.to(device=state_delta.device, dtype=state_delta.dtype)
 
-            state_delta = state_delta * state_step_sizes  # elementwise scaling
+            state_delta = state_delta * state_step_sizes.unsqueeze(0).unsqueeze(0) # Ensure broadcasting [1, 1, 3]
             new_states = particles + state_delta
             # wrap_angle should handle tensors
             new_states[:, :, 2:3] = wrap_angle(new_states[:, :, 2:3])
@@ -343,8 +346,8 @@ class DPF(nn.Module):
         # For orientation, use weighted average on sin and cos.
         cos_sum = torch.sum(particle_probs_list.unsqueeze(-1) * torch.cos(particle_list[..., 2:3]), dim=2)
         sin_sum = torch.sum(particle_probs_list.unsqueeze(-1) * torch.sin(particle_list[..., 2:3]), dim=2)
-        # atan2 should handle tensors
-        mean_orientation = atan2(cos_sum, sin_sum) # Note: custom atan2 uses torch.atan2(y, x)
+        # Use torch.atan2 which expects (y, x)
+        mean_orientation = torch.atan2(sin_sum, cos_sum)
         return torch.cat([mean_position, mean_orientation], dim=-1)
 
     def connect_modules(self, batch):
@@ -372,7 +375,9 @@ class DPF(nn.Module):
         if o_flat.dtype != torch.float32:
              o_flat = o_flat.float()
 
-        encodings = self.forward_encoder(o_flat).view(B, T, -1)  # [B, T, 128] (on device)
+        # Normalize observations before encoding
+        o_flat_norm = (o_flat - self.means_t['o'].unsqueeze(0)) / (self.stds_t['o'].unsqueeze(0) + 1e-8)
+        encodings = self.forward_encoder(o_flat_norm).view(B, T, -1)  # [B, T, 128] (on device)
 
         # Initialize particles.
         if self.init_with_true_state:
@@ -410,8 +415,8 @@ class DPF(nn.Module):
             num_proposed = int(round(num_proposed_float))
             num_resampled = self.num_particles - num_proposed
 
-            resampled_particles_list = []
-            resampled_probs_list = []
+            combined_particles_list = []
+            combined_probs_list = []
 
             # --- Resampling Step (if needed) ---
             if num_resampled > 0:
@@ -443,8 +448,8 @@ class DPF(nn.Module):
                 # Initial weight is uniform for resampled, then multiplied by measurement likelihood
                 standard_particle_probs = torch.ones(B, num_resampled, device=device, dtype=dtype) * meas
 
-                resampled_particles_list.append(standard_particles)
-                resampled_probs_list.append(standard_particle_probs)
+                combined_particles_list.append(standard_particles)
+                combined_probs_list.append(standard_particle_probs)
 
 
             # --- Proposing Step (if needed) ---
@@ -456,18 +461,27 @@ class DPF(nn.Module):
                 # Initial weight is uniform for proposed, then multiplied by measurement likelihood
                 proposed_particle_probs = torch.ones(B, num_proposed, device=device, dtype=dtype) * meas_proposed
 
-                resampled_particles_list.append(proposed_particles)
-                resampled_probs_list.append(proposed_particle_probs)
+                combined_particles_list.append(proposed_particles)
+                combined_probs_list.append(proposed_particle_probs)
 
             # --- Combine Resampled and Proposed ---
-            if not resampled_particles_list: # Should not happen if num_particles > 0
-                 raise ValueError("No particles generated in loop.")
+            if not combined_particles_list: # Should not happen if num_particles > 0
+                 # If num_particles is 0, return empty lists? Or handle earlier.
+                 # If num_resampled=0 and num_proposed=0, this means num_particles=0.
+                 # Let's assume num_particles > 0.
+                 if self.num_particles > 0:
+                     raise ValueError("No particles generated in loop, but num_particles > 0.")
+                 else: # Handle num_particles = 0 case gracefully
+                     particles = torch.empty((B, 0, self.state_dim), device=device, dtype=dtype)
+                     particle_probs = torch.empty((B, 0), device=device, dtype=dtype)
 
-            particles = torch.cat(resampled_particles_list, dim=1)
-            particle_probs = torch.cat(resampled_probs_list, dim=1)
+            else:
+                particles = torch.cat(combined_particles_list, dim=1)
+                particle_probs = torch.cat(combined_probs_list, dim=1)
 
-            # Normalize probabilities (add epsilon for stability)
-            particle_probs = particle_probs / (particle_probs.sum(dim=1, keepdim=True) + 1e-16)
+                # Normalize probabilities (add epsilon for stability)
+                prob_sum = particle_probs.sum(dim=1, keepdim=True)
+                particle_probs = particle_probs / (prob_sum + 1e-16)
 
             # Append current step results (tensors on device)
             particle_list.append(particles)
@@ -502,14 +516,76 @@ class DPF(nn.Module):
         device = self.device # Get device from model
         dtype = next(self.parameters()).dtype # Get dtype from model parameters
 
+        # --- Helper function for plotting (to be passed in dict) ---
+        # These lambda functions capture self and other necessary variables
+        # They expect the batch to be already on the correct device
+        def plot_motion_wrapper(epoch, batch):
+            if epoch % 10 == 0:
+                self.eval() # Set to eval mode for plotting consistency
+                with torch.no_grad():
+                    s_batch = batch['s']
+                    a_batch = batch['a']
+                    initial_state_expanded = s_batch[:, 0:1].expand(-1, self.num_particles, -1)
+                    motion_samples = self.motion_update(a_batch[:, 1], initial_state_expanded)
+                # Move batch and samples to CPU for plotting function
+                batch_cpu = {k: v.cpu() if torch.is_tensor(v) else v for k, v in batch.items()}
+                self.plot_motion_model(batch_cpu, motion_samples.cpu(), plot_task)
+
+        def plot_measurement_wrapper(epoch, batch):
+             if epoch % 10 == 0:
+                self.eval()
+                with torch.no_grad():
+                    s_batch = batch['s']
+                    o_batch = batch['o']
+                    B = s_batch.size(0)
+                    if B <= 1: return # Need B > 1 for this plot
+
+                    test_particles = s_batch[:, 0].unsqueeze(1).expand(B, B, -1)
+                    o_first = o_batch[:, 0]
+                    # Normalize obs before encoding
+                    o_first_norm = (o_first - self.means_t['o'].unsqueeze(0)) / (self.stds_t['o'].unsqueeze(0) + 1e-8)
+                    encoding = self.forward_encoder(o_first_norm)
+
+                    encoding_expanded = encoding.unsqueeze(1).expand(B, B, -1)
+                    encoding_flat = encoding_expanded.reshape(B * B, -1)
+                    test_particles_flat = test_particles.reshape(B * B, 1, -1)
+                    measurement_out_flat = self.measurement_update(encoding_flat, test_particles_flat)
+                    measurement_out = measurement_out_flat.view(B, B)
+                self.plot_measurement_model(measurement_out.cpu()) # Move to CPU
+
+        def plot_proposer_wrapper(epoch, batch):
+             if epoch % 10 == 0:
+                self.eval()
+                with torch.no_grad():
+                    o_batch = batch['o']
+                    # Normalize obs before encoding
+                    o_first_norm = (o_batch[:, 0] - self.means_t['o'].unsqueeze(0)) / (self.stds_t['o'].unsqueeze(0) + 1e-8)
+                    encoding = self.forward_encoder(o_first_norm)
+                    proposed_particles = self.propose_particles(encoding, self.num_particles)
+                # Move batch and samples to CPU for plotting function
+                batch_cpu = {k: v.cpu() if torch.is_tensor(v) else v for k, v in batch.items()}
+                self.plot_particle_proposer(batch_cpu, proposed_particles.cpu(), plot_task)
+
+        def plot_e2e_wrapper(epoch, batch):
+             if epoch % 1 == 0: # Plot every epoch for E2E
+                self.eval()
+                # No need for gradients here, predict handles no_grad
+                # Predict requires a batch dict, not just the device batch
+                # Need to get a batch from a non-repeating iterator ideally
+                # For simplicity, we'll plot using the passed batch (which might be from repeating iterator)
+                # Move batch to CPU first for the plotting function
+                batch_cpu = {k: v.cpu().numpy() if torch.is_tensor(v) else v for k, v in batch.items()}
+                self.plot_particle_filter(batch_cpu, plot_task, num_particles_plot=500) # Use CPU batch
+
         # Stage: Train Odometry Model.
         if self.learn_odom:
             def train_odom_fn(batch):
                 # batch is assumed to be on the correct device
                 s_batch = batch['s']
                 a_batch = batch['a']
-                # Expand first state to match particle count
-                initial_state_expanded = s_batch[:, 0:1].expand(-1, self.num_particles, -1)
+                # Expand first state to match particle count (use a reasonable number for training)
+                num_train_samples = 1 # Only need one sample if stop_sampling_gradient=True
+                initial_state_expanded = s_batch[:, 0:1].expand(-1, num_train_samples, -1)
                 # Motion update expects particles on device
                 motion_samples = self.motion_update(a_batch[:, 1],
                                                     initial_state_expanded,
@@ -518,13 +594,21 @@ class DPF(nn.Module):
                 sq_distance = compute_sq_distance(motion_samples, s_batch[:, 1:2], self.state_step_sizes_t)
                 return sq_distance.mean() # Mean over batch and particles
             optimizer_odom = torch.optim.Adam(self.mo_transition_model.parameters(), lr=learning_rate)
-            train_stages['train_odom'] = {'loss_fn': train_odom_fn, 'optimizer': optimizer_odom, 'batch_iterator_names': {'train': 'train1', 'val': 'val1'}}
+            train_stages['train_odom'] = {
+                'loss_fn': train_odom_fn,
+                'optimizer': optimizer_odom,
+                'batch_iterator_names': {'train': 'train1', 'val': 'val1'},
+                'monitor_losses': ['loss'], # Primary loss is the only one here
+                'validation_loss': 'loss',
+                'plot': plot_motion_wrapper
+                }
 
         # Stage: Train Motion Noise Generator.
         def train_motion_sampling_fn(batch):
             # batch is assumed to be on the correct device
             s_batch = batch['s']
             a_batch = batch['a']
+            # Use self.num_particles for training noise generator
             initial_state_expanded = s_batch[:, 0:1].expand(-1, self.num_particles, -1)
             # Motion update (gradients flow through noise generator)
             motion_samples = self.motion_update(a_batch[:, 1], initial_state_expanded)
@@ -534,13 +618,22 @@ class DPF(nn.Module):
             sq_distance = compute_sq_distance(motion_samples, s_batch[:, 1:2], self.state_step_sizes_t) # [B, N]
             # Gaussian kernel activation (ensure constants are tensors on device)
             norm_const = 1.0 / torch.sqrt(torch.tensor(2 * np.pi * std_val ** 2, device=device, dtype=dtype))
-            activations = (1 / self.num_particles) * norm_const * \
+            # Ensure num_particles is float for division
+            num_particles_float = float(self.num_particles)
+            activations = (1 / num_particles_float) * norm_const * \
                           torch.exp(-sq_distance / (2.0 * std_val ** 2)) # [B, N]
             # Negative log likelihood loss (sum over particles, mean over batch)
             loss = (-torch.log(1e-16 + torch.sum(activations, dim=1))).mean()
             return loss
         optimizer_motion = torch.optim.Adam(self.mo_noise_generator.parameters(), lr=learning_rate)
-        train_stages['train_motion_sampling'] = {'loss_fn': train_motion_sampling_fn, 'optimizer': optimizer_motion, 'batch_iterator_names': {'train': 'train1', 'val': 'val1'}}
+        train_stages['train_motion_sampling'] = {
+            'loss_fn': train_motion_sampling_fn,
+            'optimizer': optimizer_motion,
+            'batch_iterator_names': {'train': 'train1', 'val': 'val1'},
+            'monitor_losses': ['loss'],
+            'validation_loss': 'loss',
+            'plot': plot_motion_wrapper # Can reuse motion plot
+            }
 
         # Stage: Train Measurement Model.
         def train_measurement_model_fn(batch):
@@ -555,7 +648,9 @@ class DPF(nn.Module):
             test_particles = s_batch[:, 0].unsqueeze(1).expand(B, B, -1)
             # Encode the first observation image (on device)
             o_first = o_batch[:, 0] # [B, H, W, C] or [B, C, H, W]
-            encoding = self.forward_encoder(o_first) # [B, 128]
+            # Normalize obs before encoding
+            o_first_norm = (o_first - self.means_t['o'].unsqueeze(0)) / (self.stds_t['o'].unsqueeze(0) + 1e-8)
+            encoding = self.forward_encoder(o_first_norm) # [B, 128]
 
             # Expand encoding to match particle structure: [B, 1, 128] -> [B, B, 128]
             encoding_expanded = encoding.unsqueeze(1).expand(B, B, -1)
@@ -576,10 +671,13 @@ class DPF(nn.Module):
             mask = ~torch.eye(B, dtype=torch.bool, device=device)
             incorrect_samples = measurement_out[mask] # Flattened off-diagonal elements [B*(B-1)]
 
-            # Binary cross-entropy like loss
-            # Maximize likelihood for correct pairs (diag), minimize for incorrect pairs (off-diag)
-            loss_correct = -torch.log(correct_samples + 1e-16).mean() # Average over B
-            loss_incorrect = -torch.log(1.0 - incorrect_samples + 1e-16).mean() # Average over B*(B-1)
+            # Heuristic loss from original TF code
+            loss_correct = -torch.log(correct_samples + 1e-16).sum() / B
+            num_incorrect = B * (B - 1)
+            if num_incorrect > 0:
+                 loss_incorrect = -torch.log(1.0 - incorrect_samples + 1e-16).sum() / num_incorrect
+            else:
+                 loss_incorrect = torch.tensor(0.0, device=device, dtype=dtype)
 
             loss = loss_correct + loss_incorrect
             return loss
@@ -587,9 +685,14 @@ class DPF(nn.Module):
         params_measurement = list(self.encoder_conv.parameters()) + list(self.encoder_linear.parameters()) + \
                              list(self.obs_like_estimator.parameters())
         optimizer_measurement = torch.optim.Adam(params_measurement, lr=learning_rate)
-        # Uses full sequence length for better context? Or just first step? Original used seq_len=2 ('train1')
-        # Let's assume it needs pairs, so 'train1'/'val1' iterators.
-        train_stages['train_measurement_model'] = {'loss_fn': train_measurement_model_fn, 'optimizer': optimizer_measurement, 'batch_iterator_names': {'train': 'train1', 'val': 'val1'}}
+        train_stages['train_measurement_model'] = {
+            'loss_fn': train_measurement_model_fn,
+            'optimizer': optimizer_measurement,
+            'batch_iterator_names': {'train': 'train1', 'val': 'val1'},
+            'monitor_losses': ['loss'],
+            'validation_loss': 'loss',
+            'plot': plot_measurement_wrapper
+            }
 
 
         # Stage: Train Particle Proposer.
@@ -600,7 +703,9 @@ class DPF(nn.Module):
                 o_batch = batch['o']
                 # Stop gradients into the encoder
                 with torch.no_grad():
-                    encoding = self.forward_encoder(o_batch[:, 0]) # [B, 128]
+                    # Normalize obs before encoding
+                    o_first_norm = (o_batch[:, 0] - self.means_t['o'].unsqueeze(0)) / (self.stds_t['o'].unsqueeze(0) + 1e-8)
+                    encoding = self.forward_encoder(o_first_norm) # [B, 128]
 
                 # Propose particles (on device)
                 proposed_particles = self.propose_particles(encoding, self.num_particles) # [B, N, 3]
@@ -614,14 +719,21 @@ class DPF(nn.Module):
 
                 # Gaussian kernel activation (ensure constants are tensors on device)
                 norm_const = 1.0 / torch.sqrt(torch.tensor(2 * np.pi * std_val ** 2, device=device, dtype=dtype))
-                activations = (1 / self.num_particles) * norm_const * \
+                num_particles_float = float(self.num_particles)
+                activations = (1 / num_particles_float) * norm_const * \
                               torch.exp(-sq_distance / (2.0 * std_val ** 2)) # [B, N]
                 # Negative log likelihood loss (sum over particles, mean over batch)
                 loss = (-torch.log(1e-16 + torch.sum(activations, dim=1))).mean()
                 return loss
             optimizer_proposer = torch.optim.Adam(self.particle_proposer.parameters(), lr=learning_rate)
-            # Proposer uses first step image/state, so 'train1'/'val1' iterators seem appropriate.
-            train_stages['train_particle_proposer'] = {'loss_fn': train_particle_proposer_fn, 'optimizer': optimizer_proposer, 'batch_iterator_names': {'train': 'train1', 'val': 'val1'}}
+            train_stages['train_particle_proposer'] = {
+                'loss_fn': train_particle_proposer_fn,
+                'optimizer': optimizer_proposer,
+                'batch_iterator_names': {'train': 'train1', 'val': 'val1'},
+                'monitor_losses': ['loss'],
+                'validation_loss': 'loss',
+                'plot': plot_proposer_wrapper
+                }
 
         # Stage: End-to-End Training.
         def train_e2e_fn(batch):
@@ -646,24 +758,29 @@ class DPF(nn.Module):
             activations = particle_probs_list * norm_const * \
                           torch.exp(-sq_dist / (2.0 * std_val ** 2)) # [B, T, N]
 
-            # Negative log likelihood loss
+            # Negative log likelihood loss (MLE loss from original)
             # Sum over particles N, then mean over time T and batch B
             log_likelihood_per_step = torch.log(1e-16 + torch.sum(activations, dim=2)) # [B, T]
-            loss = -log_likelihood_per_step.mean() # Mean over B and T
+            mle_loss = -log_likelihood_per_step.mean() # Mean over B and T
 
             # Additionally monitor the MSE on the last time step prediction
             # Use the stored self.pred_states from connect_modules
             pred_states = self.pred_states # [B, T, 3]
-            # compute_sq_distance uses state_step_sizes for weighting, so it's not exactly MSE unless step_sizes are 1
-            # Let's compute simple MSE for monitoring
-            mse_last_step = F.mse_loss(pred_states[:, -1], s_batch[:, -1])
+            # compute_sq_distance uses state_step_sizes for weighting
+            mse_last_step = compute_sq_distance(pred_states[:, -1:], s_batch[:, -1:], self.state_step_sizes_t).mean()
 
             # Return primary loss for optimization, and secondary for monitoring
-            return loss, mse_last_step
+            return mle_loss, mse_last_step
 
         optimizer_e2e = torch.optim.Adam(self.parameters(), lr=learning_rate) # Optimize all parameters
-        # E2E uses full sequences, so 'train'/'val' iterators.
-        train_stages['train_e2e'] = {'loss_fn': train_e2e_fn, 'optimizer': optimizer_e2e, 'batch_iterator_names': {'train': 'train', 'val': 'val'}}
+        train_stages['train_e2e'] = {
+            'loss_fn': train_e2e_fn,
+            'optimizer': optimizer_e2e,
+            'batch_iterator_names': {'train': 'train', 'val': 'val'},
+            'monitor_losses': ['mle', 'mse_last'], # Match original names
+            'validation_loss': 'mse_last', # Match original validation loss
+            'plot': plot_e2e_wrapper
+            }
 
         return train_stages
 
@@ -675,8 +792,8 @@ class DPF(nn.Module):
         self.eval() # Set model to evaluation mode
         if self.device is None:
              raise ValueError("Device not set. Call fit() or manually set self.device and statistics.")
-        if self.num_particles != num_particles:
-             print(f"Warning: Overriding model num_particles ({self.num_particles}) with prediction num_particles ({num_particles})")
+        if self.num_particles is None or self.num_particles != num_particles:
+             # print(f"Warning: Overriding model num_particles ({self.num_particles}) with prediction num_particles ({num_particles})")
              self.num_particles = num_particles # Allow overriding for prediction
 
         # Move input batch to the same device as the model
@@ -736,14 +853,20 @@ class DPF(nn.Module):
         dtype = torch.float32 # Default dtype
 
         # Convert means and stds (which are dictionaries of arrays)
-        self.means_t = {k: torch.tensor(v, dtype=dtype, device=device) for k, v in self.means.items()}
-        self.stds_t = {k: torch.tensor(v, dtype=dtype, device=device) for k, v in self.stds.items()}
-
-        # Convert others
+        # Ensure they have the expected batch/particle dimensions for broadcasting
+        self.means_t = {k: torch.tensor(v, dtype=dtype, device=device).unsqueeze(0).unsqueeze(0) if k == 's' else torch.tensor(v, dtype=dtype, device=device) for k, v in self.means.items()}
+        self.stds_t = {k: torch.tensor(v, dtype=dtype, device=device).unsqueeze(0).unsqueeze(0) if k == 's' else torch.tensor(v, dtype=dtype, device=device) for k, v in self.stds.items()}
+        # Add action dim expansion for stds['a']
+        # print(self.stds_t['a'].shape)
+        # if 'a' in self.stds_t:
+        #     self.stds_t['a'] = self.stds_t['a'].unsqueeze(0).unsqueeze(0) # Shape [1, 1, 3]
+        # print(self.stds_t['a'].shape)
+        # Convert others (these are usually 1D arrays)
         self.state_step_sizes_t = torch.tensor(self.state_step_sizes, dtype=dtype, device=device)
         self.state_mins_t = torch.tensor(self.state_mins, dtype=dtype, device=device)
         self.state_maxs_t = torch.tensor(self.state_maxs, dtype=dtype, device=device)
         print(f"Converted statistics to tensors on device {device}")
+
 
     def fit(self, data, model_path, train_individually, train_e2e, split_ratio,
             seq_len, batch_size, epoch_length, num_epochs, patience,
@@ -772,7 +895,7 @@ class DPF(nn.Module):
         # Update dropout probability based on keep_ratio
         if hasattr(self, 'encoder_dropout'):
              self.encoder_dropout.p = 1.0 - dropout_keep_ratio
-        if hasattr(self, 'particle_proposer') and hasattr(self.particle_proposer[-6], 'p'): # Assuming dropout is 3rd layer in proposer
+        if hasattr(self, 'particle_proposer'):
              # Find dropout layer in proposer sequence if necessary
              for layer in self.particle_proposer:
                  if isinstance(layer, nn.Dropout):
@@ -793,14 +916,14 @@ class DPF(nn.Module):
         # --- Create Batch Iterators ---
         # These iterators yield numpy arrays or tensors (handle in loop)
         epoch_lengths = {'train': epoch_length, 'val': epoch_length * 2} # Steps per epoch
+        # Use repeating iterators for training/validation during epochs
         batch_iterators = {
             'train': make_repeating_batch_iterator(data_split['train'], epoch_lengths['train'], batch_size=batch_size, seq_len=seq_len),
             'val': make_repeating_batch_iterator(data_split['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=seq_len),
             'train1': make_repeating_batch_iterator(data_split['train'], epoch_lengths['train'], batch_size=batch_size, seq_len=2), # For 1-step losses
             'val1': make_repeating_batch_iterator(data_split['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=2),
-            # Add non-repeating iterators if needed for final evaluation or plotting
-            # 'train_ex': make_batch_iterator(data_split['train'], batch_size=batch_size, seq_len=seq_len),
-            # 'val_ex': make_batch_iterator(data_split['val'], batch_size=batch_size, seq_len=seq_len),
+            # Add non-repeating iterators for plotting specific examples if needed
+            'val_ex': make_batch_iterator(data_split['val'], batch_size=batch_size, seq_len=seq_len),
         }
 
         # --- Compile training stages ---
@@ -811,7 +934,7 @@ class DPF(nn.Module):
         if not os.path.exists(model_path):
             os.makedirs(model_path)
         # Save the original numpy statistics
-        np.savez(os.path.join(model_path, 'statistics'),
+        np.savez(os.path.join(model_path, 'statistics.npz'),
                  means=self.means, stds=self.stds, state_step_sizes=self.state_step_sizes,
                  state_mins=self.state_mins, state_maxs=self.state_maxs)
         print(f"Saved statistics to {os.path.join(model_path, 'statistics.npz')}")
@@ -834,37 +957,52 @@ class DPF(nn.Module):
              print("Warning: No training stages selected in the curriculum.")
              return None
 
-        log = {stage: {'train': {'loss': [], 'monitor': []}, 'val': {'loss': [], 'monitor': []}} for stage in curriculum}
+        # Initialize log structure based on monitor_losses defined in compile_training_stages
+        log = {}
+        for stage_name in curriculum:
+            stage_info = train_stages[stage_name]
+            log[stage_name] = {'train': {}, 'val': {}}
+            for loss_key in stage_info['monitor_losses']:
+                 log[stage_name]['train'][loss_key] = {'mean': [], 'se': []} # Match original structure
+                 log[stage_name]['val'][loss_key] = {'mean': [], 'se': []}
+
         best_overall_val_loss = float('inf') # Track best loss across all stages for final save
 
         # --- Training Loop ---
-        for stage in curriculum:
-            print(f"\n--- Starting Training Stage: {stage} ---")
+        for stage_name in curriculum:
+            print(f"\n--- Starting Training Stage: {stage_name} ---")
+            stage_info = train_stages[stage_name]
             best_stage_val_loss = float('inf')
             best_stage_epoch = 0
             epoch = 0
-            optimizer = train_stages[stage]['optimizer']
-            loss_fn = train_stages[stage]['loss_fn']
-            # Get correct iterator names for this stage
-            iter_names = train_stages[stage].get('batch_iterator_names', {})
-            train_iter_name = iter_names.get('train', 'train') # Default to 'train'
-            val_iter_name = iter_names.get('val', 'val')       # Default to 'val'
+            optimizer = stage_info['optimizer']
+            loss_fn = stage_info['loss_fn']
+            iter_names = stage_info.get('batch_iterator_names', {})
+            train_iter_name = iter_names.get('train', 'train')
+            val_iter_name = iter_names.get('val', 'val')
+            monitor_keys = stage_info['monitor_losses'] # e.g., ['loss'] or ['mle', 'mse_last']
+            validation_loss_key = stage_info['validation_loss'] # e.g., 'loss' or 'mse_last'
+            plot_fn = stage_info.get('plot', None)
 
             # --- Load pre-trained model if available ---
-            pretrained_model_path = os.path.join(model_path, f'best_val_{stage}.pth')
-            if os.path.exists(pretrained_model_path):
-                try:
-                    self.load_state_dict(torch.load(pretrained_model_path, map_location=device))
-                    print(f"  Loaded pre-trained model for {stage} from: {pretrained_model_path}")
-                    # skip to next stage
-                    continue
-                except RuntimeError as e:
-                    print(f"  Error loading pre-trained model for {stage}: {e}. Training from current state.")
+            # Check if a model specifically saved for *this stage* exists
+            # This logic might need adjustment depending on whether stages build sequentially
+            # For now, we just load the overall best model before starting a stage
+            save_path_overall = os.path.join(model_path, 'best_validation.pth')
+            if os.path.exists(save_path_overall):
+                 try:
+                     self.load_state_dict(torch.load(save_path_overall, map_location=device))
+                     print(f"  Loaded best model state from: {save_path_overall}")
+                 except Exception as e:
+                     print(f"  Error loading previous best model state: {e}. Starting stage with current parameters.")
             else:
-                print(f"  No pre-trained model found for {stage}. Training from current state.")
+                 print(f"  No previous best model found. Starting stage {stage_name} with current parameters.")
+
 
             while epoch < num_epochs and (epoch - best_stage_epoch) < patience:
-                epoch_log = {'train': {'loss': [], 'monitor': []}, 'val': {'loss': [], 'monitor': []}}
+                # Dictionary to store losses for the current epoch
+                epoch_loss_lists = {'train': {k: [] for k in monitor_keys}, 'val': {k: [] for k in monitor_keys}}
+
                 for phase in ['train', 'val']:
                     is_train = phase == 'train'
                     self.train(is_train) # Set train/eval mode
@@ -880,157 +1018,181 @@ class DPF(nn.Module):
                         optimizer.zero_grad(set_to_none=True) # More efficient zeroing
 
                         with torch.set_grad_enabled(is_train):
-                            # Loss function might return one (loss) or two (loss, monitor) values
+                            # Loss function returns tuple: (primary_loss, monitor1, monitor2, ...)
                             output = loss_fn(batch_device)
                             if isinstance(output, tuple):
-                                loss_val, monitor_val = output
+                                primary_loss = output[0]
+                                monitor_values = output # Keep all returned values
                             else:
-                                loss_val = output
-                                monitor_val = torch.tensor(0.0) # Placeholder if no monitor value
+                                primary_loss = output
+                                monitor_values = (output,) # Make it a tuple
 
-                            if is_train and torch.is_tensor(loss_val) and loss_val.requires_grad:
-                                loss_val.backward()
+                            if is_train and torch.is_tensor(primary_loss) and primary_loss.requires_grad:
+                                primary_loss.backward()
                                 # Optional: Gradient clipping
                                 # torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                                 optimizer.step()
 
-                        epoch_log[phase]['loss'].append(loss_val.item())
-                        epoch_log[phase]['monitor'].append(monitor_val.item())
+                        # Store monitor values from the output tuple
+                        for i, key in enumerate(monitor_keys):
+                            if i < len(monitor_values):
+                                epoch_loss_lists[phase][key].append(monitor_values[i].item())
+                            else:
+                                epoch_loss_lists[phase][key].append(0.0) # Should not happen if monitor_keys matches output
 
-                        # Print progress within epoch (optional)
-                        # if is_train and (step + 1) % (num_steps // 5) == 0:
-                        #     print(f"  Epoch {epoch} [{phase}] Step {step+1}/{num_steps} Loss: {loss_val.item():.4f}")
+                # Calculate average and SE for epoch logs (matching original format)
+                txt = "" # For printing epoch summary
+                current_val_loss = float('inf') # Reset for this epoch
+                for key in monitor_keys:
+                    txt += f'{key}: '
+                    for phase in ['train', 'val']:
+                        losses = epoch_loss_lists[phase][key]
+                        if losses:
+                            mean_loss = np.mean(losses)
+                            se_loss = np.std(losses, ddof=1) / np.sqrt(len(losses)) if len(losses) > 1 else 0.0
+                            log[stage_name][phase][key]['mean'].append(mean_loss)
+                            log[stage_name][phase][key]['se'].append(se_loss)
+                            txt += f'{mean_loss:.4f}+-{se_loss:.4f}/'
+                            # Get the validation loss for comparison
+                            if phase == 'val' and key == validation_loss_key:
+                                current_val_loss = mean_loss
+                        else:
+                            # Append NaN or handle appropriately if no data for phase/key
+                            log[stage_name][phase][key]['mean'].append(np.nan)
+                            log[stage_name][phase][key]['se'].append(np.nan)
+                            txt += f'N/A/'
+                    txt = txt[:-1] + ' -- ' # Replace last '/' with separator
 
 
-                # Calculate average losses for the epoch
-                avg_train_loss = np.mean(epoch_log['train']['loss']) if epoch_log['train']['loss'] else 0 # Handle empty lists
-                avg_val_loss = np.mean(epoch_log['val']['loss']) if epoch_log['val']['loss'] else 0
-                avg_train_monitor = np.mean(epoch_log['train']['monitor']) if epoch_log['train']['monitor'] else 0
-                avg_val_monitor = np.mean(epoch_log['val']['monitor']) if epoch_log['val']['monitor'] else 0
+                # Check for improvement and save best model
+                save_path_stage = os.path.join(model_path, f'best_val_{stage_name}.pth') # Stage-specific best (optional)
 
-                # Log epoch results
-                log[stage]['train']['loss'].append(avg_train_loss)
-                log[stage]['val']['loss'].append(avg_val_loss)
-                log[stage]['train']['monitor'].append(avg_train_monitor)
-                log[stage]['val']['monitor'].append(avg_val_monitor)
-
-                # Check for improvement and save best model for this stage
-                save_path_stage = os.path.join(model_path, f'best_val_{stage}.pth')
-                save_path_overall = os.path.join(model_path, 'best_validation.pth') # Overall best
-
-                if avg_val_loss < best_stage_val_loss:
-                    best_stage_val_loss = avg_val_loss
+                if current_val_loss < best_stage_val_loss:
+                    best_stage_val_loss = current_val_loss
                     best_stage_epoch = epoch
-                    torch.save(self.state_dict(), save_path_stage)
-                    print(f"  * Stage {stage}: New best validation loss: {avg_val_loss:.4f}. Saved model to {save_path_stage}")
-                    # Also check if this is the best overall model
-                    if avg_val_loss < best_overall_val_loss:
-                         best_overall_val_loss = avg_val_loss
+                    # Save stage-specific best (optional, might overwrite if stages are repeated)
+                    # torch.save(self.state_dict(), save_path_stage)
+                    # Always check against overall best and save that
+                    if current_val_loss < best_overall_val_loss:
+                         best_overall_val_loss = current_val_loss
                          torch.save(self.state_dict(), save_path_overall)
-                         print(f"    * Overall: New best validation loss. Saved model to {save_path_overall}")
+                         print(f"  * Overall: New best validation loss: {current_val_loss:.4f}. Saved model to {save_path_overall}")
                     txt_prefix = f"epoch {epoch:3d} >> "
                 else:
                     txt_prefix = f"epoch {epoch:3d} == "
 
                 # Print epoch summary
-                print(f"{txt_prefix}Stage: {stage} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} "
-                      f"| Train Mon: {avg_train_monitor:.4f} | Val Mon: {avg_val_monitor:.4f} "
-                      f"| Patience: {epoch - best_stage_epoch}/{patience}")
+                print(f"{txt_prefix}Stage: {stage_name} -- {txt}Patience: {epoch - best_stage_epoch}/{patience}")
 
 
-                # Optional plotting (ensure plot functions handle device/cpu transfer)
-                # if plot and 'plot' in train_stages[stage]:
-                #     # You might need to fetch a specific batch for plotting
-                #     # plot_batch = next(batch_iterators['val_ex']) # Example: use a non-repeating iterator
-                #     # plot_batch_device = move_batch_to_device(plot_batch, device)
-                #     # train_stages[stage]['plot'](epoch, plot_batch_device) # Pass device batch
-                #     pass
+                # Optional plotting
+                if plot and plot_fn:
+                     try:
+                         # Get a batch from a non-repeating iterator for consistent plotting
+                         plot_batch = next(batch_iterators['val_ex'])
+                         plot_batch_device = move_batch_to_device(plot_batch, device)
+                         plot_fn(epoch, plot_batch_device) # Pass device batch to wrapper
+                     except StopIteration:
+                         print("Warning: Plotting iterator exhausted.")
+                         # Reset iterator if needed:
+                         batch_iterators['val_ex'] = make_batch_iterator(data_split['val'], batch_size=batch_size, seq_len=seq_len)
+                     except Exception as e:
+                         print(f"Error during plotting: {e}")
+
 
                 epoch += 1
 
-            # End of stage: Restore the best model for this stage before proceeding
-            if os.path.exists(save_path_stage):
-                 print(f"--- End of Stage {stage}. Restoring best model from epoch {best_stage_epoch} ({save_path_stage}) ---")
-                 self.load_state_dict(torch.load(save_path_stage, map_location=device))
+            # End of stage: Restore the overall best model found so far
+            if os.path.exists(save_path_overall):
+                 print(f"--- End of Stage {stage_name}. Restoring overall best model ({save_path_overall}) ---")
+                 self.load_state_dict(torch.load(save_path_overall, map_location=device))
             else:
-                 print(f"--- End of Stage {stage}. No best model saved for this stage. ---")
+                 print(f"--- End of Stage {stage_name}. No best model saved yet. ---")
 
 
         print("\n--- Training Finished ---")
-        # Optionally, load the overall best model found across all stages
+        # Final load of the best model
         if os.path.exists(save_path_overall):
-             print(f"Loading overall best model from {save_path_overall}")
+             print(f"Loading final best model from {save_path_overall}")
              self.load_state_dict(torch.load(save_path_overall, map_location=device))
 
         return log # Return training log
-  
-    # === Plotting functions (adapted to PyTorch) ===
-    # IMPORTANT: Ensure tensors are moved to CPU and converted to NumPy for plotting
 
-    def plot_motion_model(self, batch, motion_samples, task):
-        # Ensure batch and motion_samples are on CPU as numpy arrays
-        batch_cpu = {k: v.cpu().numpy() if torch.is_tensor(v) else v for k, v in batch.items()}
-        s_motion_samples = motion_samples.detach().cpu().numpy() # Detach before moving
+    # === Plotting functions (adapted to PyTorch, matching dpf_old.py style) ===
 
+    def plot_motion_model(self, batch_cpu, motion_samples_cpu, task):
+        """Plots motion model samples vs ground truth."""
+        # batch_cpu: dict of numpy arrays from CPU
+        # motion_samples_cpu: numpy array [B, N, 3] from CPU
         plt.figure('Motion Model')
-        plt.clf()
-        plot_maze(task) # Assumes plot_maze handles task string
-        # Plot only a few examples from the batch
-        num_to_plot = min(s_motion_samples.shape[0], 10)
+        plt.clf() # Clear figure
+        ax = plt.gca()
+        plot_maze(task, ax=ax) # Pass axis
+
+        num_to_plot = min(motion_samples_cpu.shape[0], 10)
         for i in range(num_to_plot):
-            # Plot particle cloud after motion update
-            plt.quiver(s_motion_samples[i, :, 0], s_motion_samples[i, :, 1],
-                       np.cos(s_motion_samples[i, :, 2]), np.sin(s_motion_samples[i, :, 2]),
-                       color='blue', width=0.001, scale=100, alpha=0.5) # Added alpha
-            # Plot initial state (t=0)
-            batch_s_i = batch_cpu['s'][i] # Get ith item from cpu batch
-            plt.quiver(batch_s_i[0, 0], batch_s_i[0, 1], np.cos(batch_s_i[0, 2]), np.sin(batch_s_i[0, 2]),
-                       color='black', scale=50, width=0.003)
-            # Plot target state (t=1)
-            plt.quiver(batch_s_i[1, 0], batch_s_i[1, 1], np.cos(batch_s_i[1, 2]), np.sin(batch_s_i[1, 2]),
-                       color='red', scale=50, width=0.003)
-        plt.gca().set_aspect('equal')
-        plt.title('Motion Model (Black: Start, Red: Target, Blue: Samples)')
-        show_pause(pause=0.01) # Use show_pause utility
+            s_motion = motion_samples_cpu[i] # Samples for example i [N, 3]
+            s_true = batch_cpu['s'][i]      # True states for example i [T, 3] (T=2 here)
 
-    def plot_measurement_model(self, measurement_model_out):
-        # Ensure input is on CPU as numpy array
-        s_measurement_model_out = measurement_model_out.detach().cpu().numpy()
+            # Plot particle cloud after motion update (blue, thin)
+            ax.quiver(s_motion[:, 0], s_motion[:, 1],
+                       np.cos(s_motion[:, 2]), np.sin(s_motion[:, 2]),
+                       color='blue', width=0.001, scale=100, alpha=0.5)
+            # Plot initial state (t=0) (black, thick)
+            ax.quiver(s_true[0, 0], s_true[0, 1], np.cos(s_true[0, 2]), np.sin(s_true[0, 2]),
+                       color='black', scale=50, width=0.003, label='Start (t=0)' if i == 0 else "")
+            # Plot target state (t=1) (red, thick)
+            ax.quiver(s_true[1, 0], s_true[1, 1], np.cos(s_true[1, 2]), np.sin(s_true[1, 2]),
+                       color='red', scale=50, width=0.003, label='Target (t=1)' if i == 0 else "")
 
+        ax.set_aspect('equal')
+        ax.set_title('Motion Model (Blue: Samples)')
+        ax.legend(fontsize='small')
+        show_pause(pause=0.01)
+
+    def plot_measurement_model(self, measurement_model_out_cpu):
+        """Plots the measurement likelihood matrix."""
+        # measurement_model_out_cpu: numpy array [B, B] from CPU
         plt.figure('Measurement Model Output')
-        plt.clf()
-        plt.imshow(s_measurement_model_out, interpolation="nearest", cmap="coolwarm")
-        plt.title('Measurement Likelihood (Correct Pair = Diagonal)')
-        plt.xlabel('Particle Index (from Batch)')
-        plt.ylabel('Observation Index (from Batch)')
-        plt.colorbar()
+        plt.clf() # Clear figure
+        ax = plt.gca()
+        im = ax.imshow(measurement_model_out_cpu, interpolation="nearest", cmap="coolwarm")
+        ax.set_title('Measurement Likelihood (Obs vs State)')
+        ax.set_xlabel('Particle State Index (from Batch)')
+        ax.set_ylabel('Observation Index (from Batch)')
+        plt.colorbar(im, ax=ax)
         show_pause(pause=0.01)
 
-    def plot_particle_proposer(self, batch, proposed_particles, task):
-         # Ensure batch and proposed_particles are on CPU as numpy arrays
-        batch_cpu = {k: v.cpu().numpy() if torch.is_tensor(v) else v for k, v in batch.items()}
-        s_samples = proposed_particles.detach().cpu().numpy()
-
+    def plot_particle_proposer(self, batch_cpu, proposed_particles_cpu, task):
+        """Plots proposed particles vs true initial state."""
+        # batch_cpu: dict of numpy arrays from CPU
+        # proposed_particles_cpu: numpy array [B, N, 3] from CPU
         plt.figure('Particle Proposer')
-        plt.clf()
-        plot_maze(task)
-        num_to_plot = min(s_samples.shape[0], 10)
+        plt.clf() # Clear figure
+        ax = plt.gca()
+        plot_maze(task, ax=ax)
+
+        num_to_plot = min(proposed_particles_cpu.shape[0], 10)
         for i in range(num_to_plot):
-            color = plt.cm.viridis(i / num_to_plot) # Use colormap for different examples
-            # Plot proposed particles
-            plt.quiver(s_samples[i, :, 0], s_samples[i, :, 1],
-                       np.cos(s_samples[i, :, 2]), np.sin(s_samples[i, :, 2]),
+            s_proposed = proposed_particles_cpu[i] # Proposed particles [N, 3]
+            s_true_initial = batch_cpu['s'][i, 0] # True state at t=0 [3]
+            color = np.random.uniform(0.0, 1.0, 3) # Generate random color
+
+            # Plot proposed particle cloud (random color, thin)
+            ax.quiver(s_proposed[:, 0], s_proposed[:, 1],
+                       np.cos(s_proposed[:, 2]), np.sin(s_proposed[:, 2]),
                        color=color, width=0.001, scale=100, alpha=0.5)
-            # Plot true state (t=0)
-            batch_s_i = batch_cpu['s'][i]
-            plt.quiver(batch_s_i[0, 0], batch_s_i[0, 1], np.cos(batch_s_i[0, 2]), np.sin(batch_s_i[0, 2]),
-                       color='red', scale=50, width=0.003, label='True State' if i == 0 else "") # Label once
-        plt.gca().set_aspect('equal')
-        plt.title('Particle Proposer (Red: True State, Colors: Proposed Clouds)')
-        plt.legend()
+            # Plot true initial state (t=0) (same random color, thick)
+            ax.quiver(s_true_initial[0], s_true_initial[1],
+                       np.cos(s_true_initial[2]), np.sin(s_true_initial[2]),
+                       color=color, scale=50, width=0.003, label=f'True State {i}' if i < 3 else "") # Label first few
+
+        ax.set_aspect('equal')
+        ax.set_title('Particle Proposer (Colors: Proposed Clouds + True State)')
+        ax.legend(fontsize='small')
         show_pause(pause=0.01)
 
-    def plot_particle_filter(self, batch, task, num_particles_plot=500):
+    def plot_particle_filter(self, batch_cpu, task, num_particles_plot=500):
         """Plots the filter evolution for one example from the batch."""
         print(f"Plotting particle filter for task {task}...")
         # Ensure model is on the correct device for prediction
@@ -1043,94 +1205,86 @@ class DPF(nn.Module):
              device = self.device
 
         # Run prediction on the first example of the batch
-        batch_first = {k: v[0:1] for k, v in batch.items()} # Select first item, keep batch dim
-        pred, particle_list, particle_probs_list = self.predict(batch_first, num_particles=num_particles_plot, return_particles=True)
+        # Need to convert numpy batch back to tensors for predict
+        batch_first_tensor = {k: torch.from_numpy(v[0:1]).float() if isinstance(v, np.ndarray) else v for k, v in batch_cpu.items()}
+
+        pred, particle_list, particle_probs_list = self.predict(batch_first_tensor, num_particles=num_particles_plot, return_particles=True)
 
         # Move results to CPU for plotting
-        pred_cpu = pred[0].detach().cpu().numpy() # Remove batch dim
-        particles_cpu = particle_list[0].detach().cpu().numpy()
-        probs_cpu = particle_probs_list[0].detach().cpu().numpy()
-        true_states_cpu = batch['s'][0].cpu().numpy() # Get true states for the first example
+        pred_cpu = pred[0].detach().cpu().numpy() # Remove batch dim [T, 3]
+        particles_cpu = particle_list[0].detach().cpu().numpy() # [T, N, 3]
+        probs_cpu = particle_probs_list[0].detach().cpu().numpy() # [T, N]
+        true_states_cpu = batch_cpu['s'][0] # True states for the first example [T, 3]
 
         T = particles_cpu.shape[0] # Number of time steps T
         N = particles_cpu.shape[1] # Number of particles N
 
-        # Plotting parameters
+        # Plotting parameters from dpf_old.py
         head_scale = 1.5
         quiv_kwargs = {'scale_units': 'xy', 'scale': 1. / 40., 'width': 0.003,
                        'headlength': 5 * head_scale, 'headwidth': 3 * head_scale,
                        'headaxislength': 4.5 * head_scale}
         marker_kwargs = {'markersize': 4.5, 'markerfacecolor': 'None', 'markeredgewidth': 0.5}
         color_list = plt.cm.tab10(np.linspace(0, 1, 10))
-        pf_color = color_list[1] # Color for PF prediction
+        # Use a consistent color for the PF prediction line (e.g., color_list[1] or [2])
+        pf_color = color_list[1] # Example: Blue
 
         num_rows = 4
         num_cols = 5
         num_plots = num_rows * num_cols
+        num_steps_to_plot = min(T, num_plots -1) # Reserve last plot for trajectory
 
-        plt.figure(f"Particle Filter Evolution (Example 0)", figsize=[12, 9.6]) # Adjusted figsize
-        plt.clf()
+        fig = plt.figure(f"Particle Filter Evolution (Example 0, N={N})", figsize=[12, 9.6])
+        fig.clf() # Clear figure
 
-        for i in range(min(T, num_plots)): # Plot each step up to num_plots
-            ax = plt.subplot(num_rows, num_cols, i + 1)
-            plt.cla()
+        for i in range(num_steps_to_plot): # Plot each step up to num_plots - 1
+            ax = fig.add_subplot(num_rows, num_cols, i + 1)
+            ax.cla()
             plot_maze(task, margin=5, linewidth=0.5, ax=ax) # Pass axis to plot_maze
 
-            if i < T: # Plot particles and true state for step i
-                s_particle = particles_cpu[i] # [N, 3]
-                s_probs = probs_cpu[i] # [N]
+            s_particle = particles_cpu[i] # [N, 3]
+            s_probs = probs_cpu[i] # [N]
 
-                # Normalize probabilities for color mapping if needed
-                # clim_max = max(1e-9, 2.0 * np.mean(s_probs)) # Avoid zero max clim
-                clim_max = np.percentile(s_probs, 99) * 1.5 + 1e-9 # Use percentile for robustness
+            # Clim from dpf_old.py
+            clim = [0.0, 2.0 / N]
 
-                # Plot particles, colored by probability
-                ax.quiver(s_particle[:, 0], s_particle[:, 1],
-                          np.cos(s_particle[:, 2]), np.sin(s_particle[:, 2]),
-                          s_probs, cmap='viridis_r', clim=[0, clim_max], # Adjusted clim
-                          alpha=0.7, **quiv_kwargs) # Added alpha
+            # Plot particles, colored by probability
+            ax.quiver(s_particle[:, 0], s_particle[:, 1],
+                      np.cos(s_particle[:, 2]), np.sin(s_particle[:, 2]),
+                      s_probs, cmap='viridis_r', clim=clim,
+                      alpha=1.0, **quiv_kwargs) # Use exact kwargs
 
-                # Plot true state at step i
-                current_state = true_states_cpu[i]
-                ax.quiver(current_state[0], current_state[1],
-                          np.cos(current_state[2]), np.sin(current_state[2]),
-                          color="red", label='True State' if i == 0 else "", **quiv_kwargs)
-                ax.plot(current_state[0], current_state[1], 'or', label='_nolegend_', **marker_kwargs)
+            # Plot true state at step i
+            current_state = true_states_cpu[i]
+            ax.quiver(current_state[0], current_state[1],
+                      np.cos(current_state[2]), np.sin(current_state[2]),
+                      color="red", **quiv_kwargs) # Use exact kwargs
+            # Plot true state marker
+            ax.plot(current_state[0], current_state[1], 'or', **marker_kwargs) # Use exact kwargs
 
-                # Plot predicted state (mean particle) at step i
-                pred_state = pred_cpu[i]
-                ax.quiver(pred_state[0], pred_state[1],
-                          np.cos(pred_state[2]), np.sin(pred_state[2]),
-                          color=pf_color, label='PF Estimate' if i == 0 else "", **quiv_kwargs)
-                ax.plot(pred_state[0], pred_state[1], 'o', color=pf_color, label='_nolegend_', **marker_kwargs)
+            ax.set_title(f'Step {i}')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_aspect('equal')
 
-                ax.set_title(f'Step {i}')
+        # Final plot shows full trajectory
+        ax = fig.add_subplot(num_rows, num_cols, num_plots) # Use last subplot
+        ax.cla()
+        plot_maze(task, margin=5, linewidth=0.5, ax=ax)
+        # Plot true trajectory
+        ax.plot(true_states_cpu[:T, 0], true_states_cpu[:T, 1], '-', linewidth=0.6, color='red', label='True Traj.')
+        # Plot predicted trajectory
+        ax.plot(pred_cpu[:T, 0], pred_cpu[:T, 1], '-', linewidth=0.6, color=pf_color, label='PF Traj.')
+        # Mark start points
+        ax.plot(true_states_cpu[0, 0], true_states_cpu[0, 1], '.', color='red', markersize=3)
+        ax.plot(pred_cpu[0, 0], pred_cpu[0, 1], '.', color=pf_color, markersize=3)
+        ax.set_title(f'Full Trajectory (T={T})')
+        ax.legend(fontsize='small', loc='best') # Use 'best' location
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect('equal')
 
-            # Add legend to the first plot
-            if i == 0:
-                 ax.legend(fontsize='small', loc='upper right')
-
-            # Final plot shows full trajectory
-            if i == num_plots - 1 or i == T - 1:
-                 ax = plt.subplot(num_rows, num_cols, num_plots) # Use last subplot for trajectory
-                 plt.cla()
-                 plot_maze(task, margin=5, linewidth=0.5, ax=ax)
-                 # Plot true trajectory
-                 ax.plot(true_states_cpu[:, 0], true_states_cpu[:, 1], '-', linewidth=1.0, color='red', label='True Trajectory')
-                 # Plot predicted trajectory
-                 ax.plot(pred_cpu[:, 0], pred_cpu[:, 1], '-', linewidth=1.0, color=pf_color, label='PF Trajectory')
-                 # Mark start points
-                 ax.plot(true_states_cpu[0, 0], true_states_cpu[0, 1], 'o', color='red', markersize=5, label='_nolegend_')
-                 ax.plot(pred_cpu[0, 0], pred_cpu[0, 1], 'o', color=pf_color, markersize=5, label='_nolegend_')
-                 ax.set_title(f'Full Trajectory (T={T})')
-                 ax.legend(fontsize='small', loc='upper right')
-
-
-            plt.xticks([])
-            plt.yticks([])
-            plt.gca().set_aspect('equal')
 
         plt.tight_layout(pad=0.5) # Adjust subplot spacing
-        # plt.subplots_adjust(left=0.02, bottom=0.02, right=0.98, top=0.95, wspace=0.05, hspace=0.15)
         show_pause(pause=0.01)
 
