@@ -1,11 +1,12 @@
 import torch.nn as nn
 import torch.nn.functional as F
+import torch
 
 class Encoder(nn.Module):
     def __init__(self, dropout_keep_prob):
         super(Encoder, self).__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(4, 16, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
@@ -17,7 +18,7 @@ class Encoder(nn.Module):
         self.linear = nn.Linear(64 * 3 * 3, 128)
 
     def forward(self, o):
-        if o.dim() == 4 and o.size(-1) == 3:
+        if o.dim() == 4 and o.size(-1) == 4:
             o = o.permute(0, 3, 1, 2).contiguous()
         if o.dtype != torch.float32:
             o = o.float()

@@ -53,6 +53,7 @@ class DPF(nn.Module):
         self.motion_model = MotionModel(self.state_dim, learn_odom)
         self.measurement_model = MeasurementModel(self.state_dim, min_obs_likelihood)
         self.proposer = Proposer(self.state_dim, proposer_keep_ratio) if self.use_proposer else None
+        self.num_particles = 100
 
     def forward_encoder(self, o):
         return self.encoder(o)
