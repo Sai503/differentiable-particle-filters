@@ -395,6 +395,194 @@ class DPF(nn.Module):
 
         return train_stages
 
+    def fit(self, data, model_path, train_individually, train_e2e, split_ratio,
+            seq_len, batch_size, epoch_length, num_epochs, patience,
+            learning_rate, dropout_keep_ratio, num_particles, particle_std,
+            plot_task=None, plot=False):
+        """
+        Full training loop. Handles device placement and training stages.
+        """
+        # --- Determine Device ---
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            print(f"CUDA available. Using GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            device = torch.device("cpu")
+            print("CUDA not available. Using CPU.")
+        self.device = device
+
+        # --- Move Model to Device ---
+        self.to(device)
+        dtype = next(self.parameters()).dtype
+        print(f"Model moved to device: {device}")
+
+        # --- Set parameters ---
+        self.particle_std = particle_std
+        self.num_particles = num_particles
+        if hasattr(self.encoder, 'dropout'):
+            self.encoder.dropout.p = 1.0 - dropout_keep_ratio
+        if hasattr(self.proposer, 'network'):
+            for layer in self.proposer.network:
+                if isinstance(layer, nn.Dropout):
+                    layer.p = 1.0 - self.proposer_keep_ratio
+                    break
+
+        # --- Preprocess data and compute statistics ---
+        data_split = split_data(data, ratio=split_ratio)
+        means, stds, state_step_sizes, state_mins, state_maxs = compute_statistics(data_split['train'])
+
+        self.means, self.stds = means, stds
+        self.state_step_sizes, self.state_mins, self.state_maxs = state_step_sizes, state_mins, state_maxs
+        self._stats_to_tensors(device)
+
+        # --- Create Batch Iterators ---
+        epoch_lengths = {'train': epoch_length, 'val': epoch_length * 2}
+        batch_iterators = {
+            'train': make_repeating_batch_iterator(data_split['train'], epoch_lengths['train'], batch_size=batch_size, seq_len=seq_len),
+            'val': make_repeating_batch_iterator(data_split['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=seq_len),
+            'train1': make_repeating_batch_iterator(data_split['train'], epoch_lengths['train'], batch_size=batch_size, seq_len=2),
+            'val1': make_repeating_batch_iterator(data_split['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=2),
+            'val_ex': make_batch_iterator(data_split['val'], batch_size=batch_size, seq_len=seq_len),
+        }
+
+        # --- Compile Training Stages ---
+        train_stages = self.compile_training_stages(learning_rate, plot_task)
+
+        # --- Save Statistics ---
+        if not os.path.exists(model_path):
+            os.makedirs(model_path)
+        np.savez(os.path.join(model_path, 'statistics.npz'),
+                 means=self.means, stds=self.stds, state_step_sizes=self.state_step_sizes,
+                 state_mins=self.state_mins, state_maxs=self.state_maxs)
+        print(f"Saved statistics to {os.path.join(model_path, 'statistics.npz')}")
+
+        # --- Define Curriculum ---
+        curriculum = []
+        if train_individually:
+            if self.learn_odom and 'train_motion_sampling' in train_stages:
+                curriculum.append('train_motion_sampling')
+            if 'train_measurement_model' in train_stages:
+                curriculum.append('train_measurement_model')
+            if self.use_proposer and 'train_particle_proposer' in train_stages:
+                curriculum.append('train_particle_proposer')
+        if train_e2e and 'train_e2e' in train_stages:
+            curriculum.append('train_e2e')
+
+        if not curriculum:
+            print("Warning: No training stages selected in the curriculum.")
+            return None
+
+        # --- Initialize Logs ---
+        log = {}
+        for stage_name in curriculum:
+            stage_info = train_stages[stage_name]
+            log[stage_name] = {'train': {}, 'val': {}}
+            for loss_key in stage_info['monitor_losses']:
+                log[stage_name]['train'][loss_key] = {'mean': [], 'se': []}
+                log[stage_name]['val'][loss_key] = {'mean': [], 'se': []}
+
+        best_overall_val_loss = float('inf')
+
+        # --- Training Loop ---
+        for stage_name in curriculum:
+            print(f"\n--- Starting Training Stage: {stage_name} ---")
+            stage_info = train_stages[stage_name]
+            best_stage_val_loss = float('inf')
+            best_stage_epoch = 0
+            epoch = 0
+            optimizer = stage_info['optimizer']
+            loss_fn = stage_info['loss_fn']
+            iter_names = stage_info.get('batch_iterator_names', {})
+            train_iter_name = iter_names.get('train', 'train')
+            val_iter_name = iter_names.get('val', 'val')
+            monitor_keys = stage_info['monitor_losses']
+            validation_loss_key = stage_info['validation_loss']
+
+            while epoch < num_epochs and (epoch - best_stage_epoch) < patience:
+                epoch_loss_lists = {'train': {k: [] for k in monitor_keys}, 'val': {k: [] for k in monitor_keys}}
+
+                for phase in ['train', 'val']:
+                    is_train = phase == 'train'
+                    self.train(is_train)
+                    iterator = batch_iterators[train_iter_name if is_train else val_iter_name]
+                    num_steps = epoch_lengths[phase]
+
+                    for step in range(num_steps):
+                        batch = next(iterator)
+                        batch_device = move_batch_to_device(batch, device)
+
+                        optimizer.zero_grad(set_to_none=True)
+                        with torch.set_grad_enabled(is_train):
+                            output = loss_fn(batch_device)
+                            if isinstance(output, tuple):
+                                primary_loss = output[0]
+                                monitor_values = output
+                            else:
+                                primary_loss = output
+                                monitor_values = (output,)
+
+                            if is_train and torch.is_tensor(primary_loss) and primary_loss.requires_grad:
+                                primary_loss.backward()
+                                optimizer.step()
+
+                        for i, key in enumerate(monitor_keys):
+                            if i < len(monitor_values):
+                                epoch_loss_lists[phase][key].append(monitor_values[i].item())
+                            else:
+                                epoch_loss_lists[phase][key].append(0.0)
+
+                txt = ""
+                current_val_loss = float('inf')
+                for key in monitor_keys:
+                    txt += f'{key}: '
+                    for phase in ['train', 'val']:
+                        losses = epoch_loss_lists[phase][key]
+                        if losses:
+                            mean_loss = np.mean(losses)
+                            se_loss = np.std(losses, ddof=1) / np.sqrt(len(losses)) if len(losses) > 1 else 0.0
+                            log[stage_name][phase][key]['mean'].append(mean_loss)
+                            log[stage_name][phase][key]['se'].append(se_loss)
+                            txt += f'{mean_loss:.4f}+-{se_loss:.4f}/'
+                            if phase == 'val' and key == validation_loss_key:
+                                current_val_loss = mean_loss
+                        else:
+                            log[stage_name][phase][key]['mean'].append(np.nan)
+                            log[stage_name][phase][key]['se'].append(np.nan)
+                            txt += f'N/A/'
+                    txt = txt[:-1] + ' -- '
+
+                if current_val_loss < best_stage_val_loss:
+                    best_stage_val_loss = current_val_loss
+                    best_stage_epoch = epoch
+                    if current_val_loss < best_overall_val_loss:
+                        best_overall_val_loss = current_val_loss
+                        torch.save(self.state_dict(), os.path.join(model_path, 'best_validation.pth'))
+                        print(f"  * Overall: New best validation loss: {current_val_loss:.4f}. Saved model.")
+                    txt_prefix = f"epoch {epoch:3d} >> "
+                else:
+                    txt_prefix = f"epoch {epoch:3d} == "
+
+                print(f"{txt_prefix}Stage: {stage_name} -- {txt}Patience: {epoch - best_stage_epoch}/{patience}")
+
+                if plot and plot_task:
+                    try:
+                        plot_batch = next(batch_iterators['val_ex'])
+                        plot_batch_device = move_batch_to_device(plot_batch, device)
+                        self.plot_particle_filter(plot_batch_device, plot_task)
+                    except StopIteration:
+                        batch_iterators['val_ex'] = make_batch_iterator(data_split['val'], batch_size=batch_size, seq_len=seq_len)
+                    except Exception as e:
+                        print(f"Error during plotting: {e}")
+
+                epoch += 1
+
+        print("\n--- Training Finished ---")
+        if os.path.exists(os.path.join(model_path, 'best_validation.pth')):
+            print(f"Loading final best model from {os.path.join(model_path, 'best_validation.pth')}")
+            self.load_state_dict(torch.load(os.path.join(model_path, 'best_validation.pth'), map_location=device))
+
+        return log
+
     # === Plotting functions ===
 
     def plot_motion_model(self, batch_cpu, motion_samples_cpu, task):
