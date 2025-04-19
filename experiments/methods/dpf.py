@@ -6,6 +6,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
+
+#desired updates for mbot:
+# update measurement model for standard rgb and not rgbd
+# mlp (linear layers) for lidar encoding
+# concatenate lidar and rgb encoding
+# update motion model to use lidar and rgb encoding
+
 # Assuming these utils handle torch tensors correctly or return numpy arrays
 # that we will convert.
 from utils.data_utils import wrap_angle, compute_statistics, split_data, make_batch_iterator, make_repeating_batch_iterator

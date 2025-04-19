@@ -121,6 +121,13 @@ def load_data(data_path='../data/100s', filename='nav01_train', steps_per_episod
     # Return dictionary with standard keys 'o', 's', 'a'
     # Ensure data aligns: o[t] corresponds to s[t] and leads to action a[t] (which resulted in s[t+1])
     # Original code aligns o[t+1] with s[t+1] and a[t]. Let's keep that.
+
+    # desired changes + update things to match
+    # o = camera observations (T, H, W, C)
+    # l = lidar observations (T, num_ranges)
+    # s = pose (T, x, y, theta) # slam pose
+    # a = action (T, dx, dy, dtheta) # odom deltas
+
     return {'o': reshaped_data[obs_key][:, 1:, ...], # Observation at t+1
             's': pose[:, 1:, :],                     # State at t+1
             'a': torch.cat([rel_d_x, rel_d_y, d_theta], dim=-1)} # Action taken at t
