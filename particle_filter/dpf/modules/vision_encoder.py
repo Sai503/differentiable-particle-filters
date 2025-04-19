@@ -2,9 +2,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 
-class Encoder(nn.Module):
+class VisionEncoder(nn.Module):  # Renamed from Encoder to VisionEncoder
     def __init__(self, dropout_keep_prob):
-        super(Encoder, self).__init__()
+        super(VisionEncoder, self).__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(4, 16, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),

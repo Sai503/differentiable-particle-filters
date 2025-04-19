@@ -10,7 +10,7 @@ from utils.data_utils import wrap_angle, compute_statistics, split_data, make_ba
 from utils.method_utils import atan2, compute_sq_distance
 from utils.plotting_utils import plot_maze, show_pause
 
-from .modules.encoder import Encoder
+from .modules.vision_encoder import VisionEncoder
 from .modules.motion_model import MotionModel
 from .modules.measurement_model import MeasurementModel
 from .modules.proposer import Proposer
@@ -49,7 +49,7 @@ class DPF(nn.Module):
         self.proposer_keep_ratio = proposer_keep_ratio
 
         # Initialize modules
-        self.encoder = Encoder(dropout_keep_prob)
+        self.encoder = VisionEncoder(dropout_keep_prob)
         self.motion_model = MotionModel(self.state_dim, learn_odom)
         self.measurement_model = MeasurementModel(self.state_dim, min_obs_likelihood)
         self.proposer = Proposer(self.state_dim, proposer_keep_ratio) if self.use_proposer else None
