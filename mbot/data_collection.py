@@ -19,9 +19,9 @@ path = [
 my_robot.drive_path(path)
 
 # Ensure directories exist
-os.makedirs("images", exist_ok=True)
+os.makedirs("images5", exist_ok=True)
 
-with open("lidar_scans.csv", mode="w", newline="") as file:
+with open("maze-data-5.csv", mode="w", newline="") as file:
     writer = csv.writer(file)
     writer.writerow([
         "timestamp", "range", "theta", 
@@ -37,7 +37,7 @@ with open("lidar_scans.csv", mode="w", newline="") as file:
     while time.time() - start_time < duration:
         timestamp = time.time()
         ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(timestamp))
-        image_filename = f"images/{ts_str}.jpg"
+        image_filename = f"images5/{ts_str}.jpg"
 
         # Capture image
         subprocess.run(["libcamera-jpeg", "-o", image_filename, "--timeout", "1"], check=True)

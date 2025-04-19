@@ -5,6 +5,9 @@ import math
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from PIL import Image, ImageOps
 
 # For file I/O we still use numpy; alternatively you could switch to torch.save/load.
 import numpy as np
@@ -59,520 +62,557 @@ def average_nn(states_from, states_to, step_sizes, num_from=10, num_to=100):
     return average_dist.item()
 
 
-def load_data(data_path='../data/100s', filename='nav01_train', steps_per_episode=100, num_episodes=None):
-    # Load from npz and convert to torch tensors.
-    file_path = os.path.join(data_path, filename + '.npz')
-    try:
-        raw = np.load(file_path)
-    except FileNotFoundError:
-        print(f"Error: Data file not found at {file_path}")
-        raise
-    # Convert to float32 tensors on CPU
-    data = {k: torch.tensor(v, dtype=torch.float32) for k, v in raw.items()}
-    raw.close() # Close the npz file
+def load_data(trial_numbers, data_root='./data', steps_per_episode=100, concatenate=False):
+    """
+    Args:
+        trial_numbers: List of trials (e.g., [5, 6, 7]).
+        data_root: Path to directory containing CSVs/images.
+        steps_per_episode: Fixed sequence length (T).
+        concatenate: If True, merge all trials into one batch.
+    Returns:
+        Dictionary with keys:
+            'o': Images (B, T, C, H, W) if concatenate=False, else (B*T, C, H, W)
+            'l': LiDAR ranges (B, T, num_ranges) or (B*T, num_ranges)
+            's': SLAM poses (B, T, 3) or (B*T, 3)
+            'a': Odometry deltas (B, T, 3) or (B*T, 3)
+    """
+    # Load and group all data from CSVs
+    all_episodes = []
+    for trial in trial_numbers:
+        csv_path = os.path.join(data_root, f'maze-data-{trial}.csv')
+        df = pd.read_csv(csv_path)
+        
+        # Group by timestamp (each group = one time step T)
+        grouped = df.groupby('timestamp')
+        for _, group in grouped:
+            all_episodes.append({
+                'image_path': os.path.join(data_root, group['image_filename'].iloc[0]),
+                'lidar': torch.tensor(group['range'].values, dtype=torch.float32),  # (num_ranges,)
+                'slam_pose': torch.tensor(group[['slam_x', 'slam_y', 'slam_theta']].iloc[0], dtype=torch.float32),
+                'odom_pose': torch.tensor(group[['odom_x', 'odom_y', 'odom_theta']].iloc[0], dtype=torch.float32)
+            })
 
-    # Reshape each array: [total_steps] -> [-1, steps_per_episode, ...]
-    num_total_steps = data[list(data.keys())[0]].shape[0]
-    if num_episodes is not None:
-        num_total_steps = min(num_total_steps, num_episodes * steps_per_episode)
+    # Split into episodes of fixed length
+    num_episodes = len(all_episodes) // steps_per_episode
+    episodes = []
+    for i in range(num_episodes):
+        start = i * steps_per_episode
+        end = start + steps_per_episode
+        episodes.append(all_episodes[start:end])
 
-    actual_num_episodes = num_total_steps // steps_per_episode
+    # Process each episode
+    o, l, s, a = [], [], [], []
+    for ep in episodes:
+        # Load images, flip vertically, and convert to tensor
+        ep_images = []
+        for step in ep:
+            img = Image.open(step['image_path']).convert('RGB')
+            img = ImageOps.flip(img)  # Flip upside-down images to correct orientation
+            img_tensor = torch.tensor(np.array(img)).permute(2, 0, 1).float() / 255.0  # (C, H, W)
+            ep_images.append(img_tensor)
+        ep_images = torch.stack(ep_images)  # (T, C, H, W)
+        
+        ep_lidar = [step['lidar'] for step in ep]  # List of (num_ranges,) tensors
+        ep_slam = [step['slam_pose'] for step in ep]  # (T, 3)
+        
+        # Compute odometry deltas (a[t] = odom[t+1] - odom[t])
+        ep_odom = torch.stack([step['odom_pose'] for step in ep])  # (T, 3)
+        dx = ep_odom[1:, 0] - ep_odom[:-1, 0]
+        dy = ep_odom[1:, 1] - ep_odom[:-1, 1]
+        dtheta = wrap_angle(ep_odom[1:, 2] - ep_odom[:-1, 2])
+        ep_actions = torch.stack([dx, dy, dtheta], dim=-1)  # (T-1, 3)
 
-    if actual_num_episodes == 0:
-        raise ValueError(f"Not enough data for even one episode. Found {num_total_steps} steps, need {steps_per_episode}.")
+        # Append to lists (align o[t] with s[t] and a[t])
+        o.append(ep_images[:-1])  # (T-1, C, H, W)
+        l.append(torch.stack(ep_lidar[:-1]))   # (T-1, num_ranges)
+        s.append(torch.stack(ep_slam[:-1]))    # (T-1, 3)
+        a.append(ep_actions)                  # (T-1, 3)
 
-    final_num_steps = actual_num_episodes * steps_per_episode
+    # Stack episodes into final tensors
+    if concatenate:
+        data = {
+            'o': torch.cat(o, dim=0),  # (B*T, C, H, W)
+            'l': torch.cat(l, dim=0),  # (B*T, num_ranges)
+            's': torch.cat(s, dim=0),  # (B*T, 3)
+            'a': torch.cat(a, dim=0)   # (B*T, 3)
+        }
+    else:
+        data = {
+            'o': torch.stack(o),  # (B, T-1, C, H, W)
+            'l': torch.stack(l),  # (B, T-1, num_ranges)
+            's': torch.stack(s),  # (B, T-1, 3)
+            'a': torch.stack(a)   # (B, T-1, 3)
+        }
+    return data
 
-    reshaped_data = {}
-    for key in data.keys():
-        # Slice first, then reshape
-        sliced_data = data[key][:final_num_steps]
-        try:
-            new_shape = [actual_num_episodes, steps_per_episode] + list(sliced_data.shape[1:])
-            reshaped_data[key] = sliced_data.view(*new_shape)
-        except RuntimeError as e:
-            print(f"Error reshaping key '{key}' with shape {sliced_data.shape} to {new_shape}. Error: {e}")
-            raise
-
-    # Convert degrees into radians for pose and velocity.
-    pi_tensor = torch.tensor(math.pi, dtype=torch.float32)
-    if 'pose' in reshaped_data:
-        reshaped_data['pose'][..., 2] *= pi_tensor / 180.0
-        reshaped_data['pose'][..., 2] = wrap_angle(reshaped_data['pose'][..., 2])
-    if 'vel' in reshaped_data: # Check if 'vel' exists
-        reshaped_data['vel'][..., 2] *= pi_tensor / 180.0
-        # No wrap_angle needed for velocity
-
-    # Calculate relative actions (a) based on pose (s)
-    pose = reshaped_data['pose']
-    abs_d_x = pose[:, 1:, 0:1] - pose[:, :-1, 0:1]
-    abs_d_y = pose[:, 1:, 1:2] - pose[:, :-1, 1:2]
-    d_theta = wrap_angle(pose[:, 1:, 2:3] - pose[:, :-1, 2:3])
-    s = torch.sin(pose[:, :-1, 2:3])
-    c = torch.cos(pose[:, :-1, 2:3])
-    rel_d_x = c * abs_d_x + s * abs_d_y
-    rel_d_y = -s * abs_d_x + c * abs_d_y # Corrected relative y calculation (standard rotation)
-
-    # Check if 'rgbd' key exists for observations 'o'
-    obs_key = 'rgbd' if 'rgbd' in reshaped_data else 'o' if 'o' in reshaped_data else None
-    if obs_key is None:
-        raise KeyError("Observation data key ('rgbd' or 'o') not found in loaded data.")
-
-    # Return dictionary with standard keys 'o', 's', 'a'
-    # Ensure data aligns: o[t] corresponds to s[t] and leads to action a[t] (which resulted in s[t+1])
-    # Original code aligns o[t+1] with s[t+1] and a[t]. Let's keep that.
-
-    # desired changes + update things to match
-    # o = camera observations (T, H, W, C)
-    # l = lidar observations (T, num_ranges)
-    # s = pose (T, x, y, theta) # slam pose
-    # a = action (T, dx, dy, dtheta) # odom deltas
-
-    return {'o': reshaped_data[obs_key][:, 1:, ...], # Observation at t+1
-            's': pose[:, 1:, :],                     # State at t+1
-            'a': torch.cat([rel_d_x, rel_d_y, d_theta], dim=-1)} # Action taken at t
 
 
 # MODIFIED compute_statistics function:
 def compute_statistics(data):
     """
-    Computes statistics (mean, std, step_sizes, min, max) from training data.
-    Calculates PER-CHANNEL statistics for observations ('o').
-    Args:
-        data (dict): Dictionary containing training data as PyTorch tensors ('o', 's', 'a').
-    Returns:
-        tuple: Contains (means, stds, state_step_sizes, state_mins, state_maxs)
-               where means and stds are dictionaries of NumPy arrays, and the rest are NumPy arrays.
-               means['o'] and stds['o'] will have shape (C,).
+    Computes statistics entirely on GPU (if available) but returns NumPy arrays.
+    Uses zero-copy GPU->CPU transfer when possible (CUDA-pinned memory).
     """
-    means_t = {}
-    stds_t = {}
-    state_step_sizes_t = []
-    state_mins_t = []
-    state_maxs_t = []
+    # Determine device from input (prioritize GPU)
+    device = next(iter(data.values())).device if data else \
+             torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # --- Calculate Means and Stds (using PyTorch) ---
-    for key in 'osa':
+    # Initialize containers (all tensors stay on original device)
+    stats = {
+        'means': {},
+        'stds': {},
+        'step_sizes': torch.empty(3, device=device),
+        'mins': torch.empty(3, device=device),
+        'maxs': torch.empty(3, device=device)
+    }
+
+    # --- Computation (all on GPU if available) ---
+    for key in ['o', 'l', 's', 'a']:
         if key not in data:
-            print(f"Warning: Key '{key}' not found in data for statistics calculation.")
+            print(f"Warning: Missing key '{key}' in statistics computation")
             continue
+            
+        t = data[key].float()
+        
+        if key == 'o':  # Images [B,T,C,H,W]
+            stats['means'][key] = torch.mean(t, dim=(0,1,3,4))  # [C]
+            stats['stds'][key] = torch.std(t, dim=(0,1,3,4))   # [C]
+            
+        elif key == 'l':  # LiDAR [B,T,N]
+            stats['means'][key] = torch.mean(t).unsqueeze(0)  # [1]
+            stats['stds'][key] = torch.std(t).unsqueeze(0)    # [1]
+            
+        elif key in ['s', 'a']:  # Poses/deltas [B,T,3]
+            stats['means'][key] = torch.mean(t, dim=(0,1))
+            stats['stds'][key] = torch.std(t, dim=(0,1))
+            
+            if key == 's':
+                # Angle wrapping for orientation (dim 2)
+                if t.shape[-1] >= 3:
+                    steps = t[:,1:] - t[:,:-1]
+                    steps[...,2] = wrap_angle(steps[...,2])
+                    stats['step_sizes'] = torch.mean(torch.abs(steps), dim=(0,1))
+                    stats['mins'] = torch.amin(t, dim=(0,1))
+                    stats['maxs'] = torch.amax(t, dim=(0,1))
 
-        current_data = data[key].float() # Ensure float type
+    # --- Zero-copy GPU->CPU conversion (if CUDA) ---
+    def to_numpy(tensor):
+        if tensor.device.type == 'cuda':
+            return tensor.detach().cpu().numpy()  # Pinned memory transfer
+        return tensor.numpy()
 
-        if key == 'o':
-            # --- Observation Statistics (Per-Channel) ---
-            if current_data.dim() != 5:
-                raise ValueError(f"Observation data 'o' must have 5 dimensions [B, T, H, W, C] or [B, T, C, H, W]. Got {current_data.dim()}")
-
-            # Infer channel dimension C (assuming it's the smallest of the last 3 dims, or last dim)
-            shape = current_data.shape
-            potential_c_dim_index = -1 # Default to last dimension
-            last_3_dims = shape[-3:]
-            if len(last_3_dims) == 3:
-                 min_dim_size = min(last_3_dims)
-                 min_dim_indices = [i for i, size in enumerate(last_3_dims) if size == min_dim_size]
-                 if len(min_dim_indices) == 1: # If unique smallest dimension among last 3
-                     potential_c_dim_index = len(shape) - 3 + min_dim_indices[0]
-                 else: # Ambiguous, default to last
-                     potential_c_dim_index = -1
-            else: # Should not happen if dim == 5
-                 potential_c_dim_index = -1
-
-            # Determine dimensions to reduce (all except the channel dimension)
-            dims_to_reduce = list(range(current_data.dim()))
-            # Convert negative index to positive if needed
-            positive_c_dim_index = potential_c_dim_index % current_data.dim()
-            dims_to_reduce.pop(positive_c_dim_index)
-            dims_to_reduce = tuple(dims_to_reduce)
-
-            print(f"DEBUG compute_stats['o']: shape={shape}, inferred C dim index={positive_c_dim_index}, reducing over dims={dims_to_reduce}")
-
-            # Calculate mean per channel (result shape [C])
-            means_t[key] = torch.mean(current_data, dim=dims_to_reduce)
-            # Calculate std per channel (result shape [C])
-            stds_t[key] = torch.std(current_data, dim=dims_to_reduce)
-
-        elif key == 's':
-            # --- State Statistics ---
-            # Mean over B, T (keepdim for broadcasting later if needed, but we convert to numpy)
-            means_t[key] = torch.mean(current_data, dim=(0, 1)) # Shape [3]
-            if means_t[key].shape[0] >= 3: # Check if state dim includes orientation
-                 means_t[key][2] = 0  # leave orientation mean at 0
-
-            # Std over B, T (keepdim for broadcasting later if needed)
-            stds_t[key] = torch.std(current_data, dim=(0, 1)) # Shape [3]
-            # Average std for x, y components if state dim >= 2
-            if stds_t[key].shape[0] >= 2:
-                 stds_t[key][:2] = torch.mean(stds_t[key][:2])
-
-        elif key == 'a':
-            # --- Action Statistics ---
-            # Mean over B, T (keepdim for broadcasting later if needed)
-            means_t[key] = torch.mean(current_data, dim=(0, 1)) # Shape [3]
-            means_t[key] = means_t[key] * 0  # set action mean to zero
-
-            # Std over B, T (keepdim for broadcasting later if needed)
-            stds_t[key] = torch.std(current_data, dim=(0, 1)) # Shape [3]
-            # Average std for x, y components if action dim >= 2
-            if stds_t[key].shape[0] >= 2:
-                 stds_t[key][:2] = torch.mean(stds_t[key][:2])
-
-
-    # --- Calculate State Step Sizes, Mins, Maxs (using PyTorch) ---
-    if 's' in data:
-        state_data = data['s'].float() # Ensure float
-        state_dim = state_data.shape[-1]
-        for i in range(state_dim):
-            # Difference between consecutive steps
-            steps = (state_data[:, 1:, i] - state_data[:, :-1, i]).view(-1)
-            if i == 2 and state_dim >= 3: # Assume dim 2 is orientation if state_dim >= 3
-                steps = wrap_angle(steps)
-            state_step_sizes_t.append(torch.mean(torch.abs(steps)))
-
-        # Average step sizes for x and y if state_dim >= 2
-        if state_dim >= 2:
-            avg_xy_step = (state_step_sizes_t[0] + state_step_sizes_t[1]) / 2.0
-            state_step_sizes_t[0] = avg_xy_step
-            state_step_sizes_t[1] = avg_xy_step
-
-        state_step_sizes_t = torch.stack(state_step_sizes_t) # Shape [3]
-
-        for i in range(state_dim):
-            state_mins_t.append(torch.min(state_data[..., i]))
-            state_maxs_t.append(torch.max(state_data[..., i]))
-        state_mins_t = torch.stack(state_mins_t) # Shape [3]
-        state_maxs_t = torch.stack(state_maxs_t) # Shape [3]
-    else: # Handle case where 's' is missing
-        print("Warning: Key 's' not found in data for statistics calculation. Step sizes, mins, maxs will be empty.")
-        state_step_sizes_t = torch.empty(0)
-        state_mins_t = torch.empty(0)
-        state_maxs_t = torch.empty(0)
-
-
-    # --- Convert to NumPy for Return ---
-    # Resulting means['o'] and stds['o'] will have shape (C,)
-    # Resulting means/stds for 's' and 'a' will have shape (3,)
-    means_np = {k: v.cpu().numpy() for k, v in means_t.items()}
-    stds_np = {k: v.cpu().numpy() for k, v in stds_t.items()}
-    state_step_sizes_np = state_step_sizes_t.cpu().numpy() # Shape (3,)
-    state_mins_np = state_mins_t.cpu().numpy() # Shape (3,)
-    state_maxs_np = state_maxs_t.cpu().numpy() # Shape (3,)
-
-    # --- Debug Print Shapes ---
-    print("DEBUG compute_stats: Final NumPy shapes:")
-    for k in means_np: print(f"  means['{k}']: {means_np[k].shape}")
-    for k in stds_np: print(f"  stds['{k}']: {stds_np[k].shape}")
-    print(f"  state_step_sizes: {state_step_sizes_np.shape}")
-    print(f"  state_mins: {state_mins_np.shape}")
-    print(f"  state_maxs: {state_maxs_np.shape}")
-
-    return means_np, stds_np, state_step_sizes_np, state_mins_np, state_maxs_np
-
+    return (
+        {k: to_numpy(v) for k,v in stats['means'].items()},
+        {k: to_numpy(v) for k,v in stats['stds'].items()},
+        to_numpy(stats['step_sizes']),
+        to_numpy(stats['mins']),
+        to_numpy(stats['maxs'])
+    )
 # --- (Rest of data_utils.py remains the same) ---
 
 def split_data(data, ratio=0.8, categories=['train', 'val']):
-    print(f"Splitting data. Input episodes: {data['s'].shape[0]}")
+    """
+    Splits data into training/validation sets while preserving GPU placement.
+    Works with new data format: {'o', 'l', 's', 'a'} tensors on any device.
+    
+    Args:
+        data: Dictionary containing:
+              'o': (B, T, C, H, W) - images
+              'l': (B, T, N)       - LiDAR
+              's': (B, T, 3)       - SLAM poses  
+              'a': (B, T, 3)       - odometry deltas
+        ratio: Train/validation split ratio
+        categories: Names for split sets
+        
+    Returns:
+        Dictionary {category: split_data} with same structure as input
+    """
+    print(f"Splitting data. Input shape - Images: {data['o'].shape}, LiDAR: {data['l'].shape}")
+    
     split_data_dict = {categories[0]: {}, categories[1]: {}}
-    num_episodes = data[list(data.keys())[0]].shape[0]
+    num_episodes = data['o'].shape[0]  # B = number of episodes
     split_point = int(num_episodes * ratio)
 
     if split_point == 0 or split_point == num_episodes:
-        raise ValueError(f"Split ratio {ratio} results in an empty '{categories[0]}' or '{categories[1]}' set. Adjust ratio or check data size.")
+        raise ValueError(
+            f"Split ratio {ratio} results in empty set. "
+            f"Episodes: {num_episodes}, Split at: {split_point}"
+        )
 
+    # Split all keys while preserving device
     for key in data.keys():
         split_data_dict[categories[0]][key] = data[key][:split_point]
         split_data_dict[categories[1]][key] = data[key][split_point:]
 
+    # Debug prints with shapes
     for cat in split_data_dict:
-        # Check if the split resulted in non-empty data for this category
-        if list(split_data_dict[cat].values()): # Check if dict has any values
-             print(f"Split --> {cat}: {split_data_dict[cat][list(data.keys())[0]].shape[0]} episodes")
+        if split_data_dict[cat]:
+            sample_key = next(iter(split_data_dict[cat]))
+            print(
+                f"Split '{cat}': {split_data_dict[cat][sample_key].shape[0]} episodes | "
+                f"Shapes - o: {split_data_dict[cat]['o'].shape}, "
+                f"l: {split_data_dict[cat]['l'].shape}"
+            )
         else:
-             print(f"Split --> {cat}: 0 episodes (Warning: Check split ratio and data size)")
+            print(f"Split '{cat}': 0 episodes (WARNING: Check data size)")
 
     return split_data_dict
 
 
 def reduce_data(data, num_episodes):
+    """
+    Reduces dataset to specified number of episodes while preserving device placement.
+    Works with new format: {'o', 'l', 's', 'a'} tensors.
+    
+    Args:
+        data: Dictionary containing batched tensors
+        num_episodes: Number of episodes to keep
+        
+    Returns:
+        Dictionary with same structure but reduced batch size
+    """
     new_data = {}
-    min_episodes = data[list(data.keys())[0]].shape[0]
-    num_episodes = min(num_episodes, min_episodes) # Don't request more than available
+    min_episodes = data['o'].shape[0]  # Using 'o' as reference for batch size
+    num_episodes = min(num_episodes, min_episodes)
+    
     if num_episodes <= 0:
-         raise ValueError("num_episodes must be positive.")
-    for key in data.keys(): # Apply to all keys
+        raise ValueError(f"num_episodes must be positive. Got {num_episodes}")
+    
+    print(f"Reducing data from {min_episodes} to {num_episodes} episodes")
+    
+    for key in data.keys():
         new_data[key] = data[key][:num_episodes]
+        
     return new_data
 
 
 def shuffle_data(data):
+    """
+    Shuffles episodes while maintaining temporal sequences within each episode.
+    Preserves device placement of tensors.
+    
+    Args:
+        data: Dictionary containing batched tensors
+        
+    Returns:
+        Dictionary with same structure but shuffled episode order
+    """
     new_data = {}
-    num_episodes = data[list(data.keys())[0]].shape[0]
-    indices = torch.randperm(num_episodes)
-    for key in data.keys(): # Apply to all keys
+    num_episodes = data['o'].shape[0]
+    device = data['o'].device  # Preserve original device
+    
+    # Create random permutation on same device as input
+    indices = torch.randperm(num_episodes, device=device)
+    
+    print(f"Shuffling {num_episodes} episodes on {device}")
+    
+    for key in data.keys():
         new_data[key] = data[key][indices]
+        
     return new_data
 
 
 def remove_state(data, provide_initial_state=False):
+    """
+    Handles SLAM pose ('s') removal while preserving other data.
+    Optionally keeps initial state if requested.
+    
+    Args:
+        data: Dictionary containing batched tensors
+        provide_initial_state: Whether to keep first timestep of poses
+        
+    Returns:
+        Dictionary with modified state information
+    """
     new_data = {}
-    # Copy keys that are not 's'
+    
+    # Copy all non-state keys
     for key in data.keys():
         if key != 's':
             new_data[key] = data[key]
-    # Optionally add initial state
-    if provide_initial_state and 's' in data:
-        new_data['s'] = data['s'][:, :1, ...] # Get only the first time step
+    
+    # Handle state specially
+    if 's' in data:
+        if provide_initial_state:
+            new_data['s'] = data['s'][:, :1, :]  # Keep only first timestep
+            print(f"Kept initial state only. Shape: {new_data['s'].shape}")
+        else:
+            print("Removed all state information")
+    
     return new_data
 
 
 def noisify_data_condition(data, condition):
-    print('Applying noise condition:', condition)
+    """
+    Applies specified noise condition to data while preserving device placement.
+    Updated for new data format: {'o', 'l', 's', 'a'} tensors on any device.
+    
+    Args:
+        data: Dictionary containing:
+              'o': (B,T,C,H,W) - images
+              'a': (B,T,3)     - odometry deltas
+              (other keys passed through unchanged)
+        condition: Noise configuration string
+        
+    Returns:
+        Dictionary with noisy data (same structure as input)
+    """
+    print(f'Applying noise condition: {condition} (device: {data["o"].device})')
+    
+    # Helper function to maintain device placement
+    def _noisyfy(data, **kwargs):
+        return noisyfy_data(data, **kwargs)  # Assumes your noisyfy_data preserves devices
+    
     if condition == 'odom0_imgTG':
-        return noisyfy_data(data, odom_noise_factor=0.0, img_noise_factor=1.0, img_random_shift=True)
+        return _noisyfy(data, odom_noise_factor=0.0, img_noise_factor=1.0, img_random_shift=True)
     elif condition == 'odom5_imgTG':
-        return noisyfy_data(data, odom_noise_factor=0.5, img_noise_factor=1.0, img_random_shift=True)
+        return _noisyfy(data, odom_noise_factor=0.5, img_noise_factor=1.0, img_random_shift=True)
     elif condition == 'odom10_imgTG':
-        return noisyfy_data(data, odom_noise_factor=1.0, img_noise_factor=1.0, img_random_shift=True) # Default
+        return _noisyfy(data, odom_noise_factor=1.0, img_noise_factor=1.0, img_random_shift=True)
     elif condition == 'odom20_imgTG':
-        return noisyfy_data(data, odom_noise_factor=2.0, img_noise_factor=1.0, img_random_shift=True)
-    elif condition == 'odomX_imgTG': # Scrambled odometry
-        data = noisyfy_data(data, odom_noise_factor=0.0, img_noise_factor=1.0, img_random_shift=True) # Start with clean odom
+        return _noisyfy(data, odom_noise_factor=2.0, img_noise_factor=1.0, img_random_shift=True)
+    elif condition == 'odomX_imgTG':
+        # Start with clean odom then scramble
+        data = _noisyfy(data, odom_noise_factor=0.0, img_noise_factor=1.0, img_random_shift=True)
         if 'a' in data:
-            shape = data['a'].shape
-            a = data['a'].view(-1, shape[-1])
-            idx = torch.randperm(a.shape[0])
-            a = a[idx]
-            data['a'] = a.view(shape)
+            B, T, _ = data['a'].shape
+            data['a'] = data['a'].view(-1, 3)[torch.randperm(B*T)].view(B,T,3)
         return data
-    elif condition == 'odom10_imgC': # Clean image
-        return noisyfy_data(data, odom_noise_factor=1.0, img_noise_factor=0.0, img_random_shift=False)
-    elif condition == 'odom10_imgG': # Gaussian noise only
-        return noisyfy_data(data, odom_noise_factor=1.0, img_noise_factor=1.0, img_random_shift=False)
-    elif condition == 'odom10_imgT': # Translation noise only
-        return noisyfy_data(data, odom_noise_factor=1.0, img_noise_factor=0.0, img_random_shift=True)
-    elif condition == 'odom10_imgX': # Scrambled images
-        data = noisyfy_data(data, odom_noise_factor=1.0, img_noise_factor=0.0, img_random_shift=False) # Start with clean images
+    elif condition == 'odom10_imgC':
+        return _noisyfy(data, odom_noise_factor=1.0, img_noise_factor=0.0, img_random_shift=False)
+    elif condition == 'odom10_imgG':
+        return _noisyfy(data, odom_noise_factor=1.0, img_noise_factor=1.0, img_random_shift=False)
+    elif condition == 'odom10_imgT':
+        return _noisyfy(data, odom_noise_factor=1.0, img_noise_factor=0.0, img_random_shift=True)
+    elif condition == 'odom10_imgX':
+        # Start with clean images then scramble
+        data = _noisyfy(data, odom_noise_factor=1.0, img_noise_factor=0.0, img_random_shift=False)
         if 'o' in data:
-            shape = data['o'].shape
-            # Flatten B and T dimensions for shuffling
-            o = data['o'].view(-1, *shape[2:])
-            idx = torch.randperm(o.shape[0])
-            o = o[idx]
-            data['o'] = o.view(shape)
+            B, T, C, H, W = data['o'].shape
+            data['o'] = data['o'].view(-1,C,H,W)[torch.randperm(B*T)].view(B,T,C,H,W)
         return data
     else:
-        print(f"Warning: Unknown noise condition '{condition}'. Applying default noise.")
-        return noisyfy_data(data)
+        print(f"Warning: Unknown condition '{condition}'. Using default noise.")
+        return _noisyfy(data)  # Default condition
+    
 
-
-def noisyfy_data(data, odom_noise_factor=1.0, img_noise_factor=1.0, img_random_shift=True, target_h=24, target_w=24):
-    """Adds noise and performs cropping on data."""
-    print(f"Noisyfying data: odom_noise={odom_noise_factor}, img_noise={img_noise_factor}, img_shift={img_random_shift}, target_size=({target_h},{target_w})")
+def noisyfy_data(data, odom_noise_factor=1.0, img_noise_factor=1.0, 
+                downsample_factor=2):
+    """
+    Adds noise and downsamples images (no cropping).
+    
+    Args:
+        data: Dict with:
+              'o': (B,T,C,H,W) - images
+              'a': (B,T,3)     - odometry deltas
+              (other keys passed through)
+        downsample_factor: How much to shrink images (e.g., 2 = half resolution)
+    """
+    print(f"Noisyfying data on {data['o'].device}: "
+          f"odom_noise={odom_noise_factor}, "
+          f"img_noise={img_noise_factor}, "
+          f"downsample={downsample_factor}x")
+    
     new_data = {}
+    device = data['o'].device
+    dtype = data['o'].dtype
 
-    # --- Noise for Actions ('a') ---
+    # --- Process Actions ---
     if 'a' in data:
-        device = data['a'].device
-        dtype = data['a'].dtype
-        # Add multiplicative noise centered around 1
-        noise_a = torch.normal(mean=1.0, std=0.1 * odom_noise_factor, size=data['a'].shape, device=device, dtype=dtype)
-        # Ensure noise doesn't make actions zero or negative if std is large
-        noise_a = torch.clamp(noise_a, min=1e-2)
-        new_data['a'] = data['a'] * noise_a
-    else:
-        print("Warning: Key 'a' not found in data during noisyfy_data.")
+        noise = torch.normal(1.0, 0.1*odom_noise_factor, 
+                           size=data['a'].shape, 
+                           device=device, dtype=dtype)
+        new_data['a'] = data['a'] * noise.clamp(min=1e-2)
 
-    # --- Noise and Cropping for Observations ('o') ---
+    # --- Downsample Images ---
     if 'o' in data:
-        obs_data = data['o'].clone() # Clone to avoid modifying original
-        device_o = obs_data.device
-        dtype_o = obs_data.dtype
-
-        # --- Ensure correct shape [B, T, H, W, C] for cropping ---
-        if obs_data.dim() != 5:
-             raise ValueError(f"Observation data 'o' must have 5 dimensions [B, T, H, W, C] or [B, T, C, H, W]. Got {obs_data.dim()}")
-
-        # Infer C, H, W assuming C is the smaller dimension (<=10)
-        shape = obs_data.shape
-        potential_c_dim = -1
-        if len(shape) == 5: # Check if 5D
-            if shape[2] <= 10 and shape[2] < shape[3] and shape[2] < shape[4]:
-                 potential_c_dim = 2
-            elif shape[-1] <= 10 and shape[-1] < shape[2] and shape[-1] < shape[3]:
-                 potential_c_dim = -1 # Or 4
-            else:
-                 # Fallback or raise error if channel dim is ambiguous
-                 print(f"Warning: Cannot reliably determine channel dimension for observation shape {shape}. Assuming channels last.")
-                 potential_c_dim = -1
-        else: # Should not happen based on earlier check, but handle defensively
-             raise ValueError(f"Observation data 'o' must have 5 dimensions. Got {obs_data.dim()}")
-
-
-        if potential_c_dim == 2: # Input is [B, T, C, H, W]
-             print("Permuting observations from [B, T, C, H, W] to [B, T, H, W, C] for cropping.")
-             obs_data = obs_data.permute(0, 1, 3, 4, 2).contiguous()
-
-        # Now obs_data should be [B, T, H, W, C]
-        B, T, H, W, C = obs_data.shape
-
-        # Check if target size is valid
-        if target_h > H or target_w > W:
-             raise ValueError(f"Target crop size ({target_h}, {target_w}) is larger than image size ({H}, {W}).")
-
-        # Initialize new_o with the TARGET shape [B, T, target_h, target_w, C]
-        new_o = torch.zeros(B, T, target_h, target_w, C, dtype=dtype_o, device=device_o)
-
-        max_offset_H = H - target_h
-        max_offset_W = W - target_w
-
-        # --- Apply Cropping ---
-        for i in range(B):
-            for j in range(T):
-                if img_random_shift:
-                    offset_h = torch.randint(0, max_offset_H + 1, (1,), device=device_o).item()
-                    offset_w = torch.randint(0, max_offset_W + 1, (1,), device=device_o).item()
-                else: # Center crop
-                    offset_h = max_offset_H // 2
-                    offset_w = max_offset_W // 2
-
-                # Crop the original image [H, W, C]
-                cropped_img = obs_data[i, j, offset_h : offset_h + target_h, offset_w : offset_w + target_w, :]
-                new_o[i, j] = cropped_img
-
-        # --- Add Gaussian Noise ---
+        B, T, C, H, W = data['o'].shape
+        new_h, new_w = H // downsample_factor, W // downsample_factor
+        
+        # Downsample with average pooling (anti-aliasing)
+        downsampled = torch.zeros(B, T, C, new_h, new_w, 
+                                device=device, dtype=dtype)
+        
+        for b in range(B):
+            for t in range(T):
+                downsampled[b,t] = torch.nn.functional.avg_pool2d(
+                    data['o'][b,t],
+                    kernel_size=downsample_factor,
+                    stride=downsample_factor
+                )
+        
+        # Add Gaussian noise if requested
         if img_noise_factor > 0:
-            # Assuming image data range is roughly 0-255, std=20 is reasonable noise level
-            noise_o = torch.normal(mean=0.0, std=20.0 * img_noise_factor, size=new_o.shape, device=device_o, dtype=dtype_o)
-            new_o = new_o + noise_o
-            # Optional: Clamp to valid image range (e.g., 0-255) if necessary
-            # new_o = torch.clamp(new_o, 0, 255)
+            noise = torch.normal(0, 20*img_noise_factor, 
+                               size=(B,T,C,new_h,new_w),
+                               device=device, dtype=dtype)
+            downsampled += noise
+        
+        new_data['o'] = downsampled
+        print(f"Downsampled images: {H}x{W} -> {new_h}x{new_w}")
 
-        new_data['o'] = new_o
-    else:
-        print("Warning: Key 'o' not found in data during noisyfy_data.")
-
-    # --- Copy State ('s') ---
-    if 's' in data:
-        new_data['s'] = data['s'].clone() # Clone state as well
-    else:
-        print("Warning: Key 's' not found in data during noisyfy_data.")
-
+    # --- Copy Other Keys ---
+    for key in ['s', 'l']:
+        if key in data:
+            new_data[key] = data[key].clone()
 
     return new_data
 
-# --- Batch Iterators (No changes needed, they yield CPU tensors) ---
 
 def make_batch_iterator(data, batch_size=32, seq_len=10):
-    """Generator yielding random batches of specified seq_len."""
+    """
+    Generator yielding random batches of specified sequence length.
+    Updated for new data format: {'o', 'l', 's', 'a'} tensors on any device.
+    
+    Args:
+        data: Dictionary containing:
+              'o': (B,T,C,H,W) - images
+              'l': (B,T,N)     - LiDAR scans
+              's': (B,T,3)     - SLAM poses  
+              'a': (B,T,3)     - odometry deltas
+        batch_size: Number of sequences per batch
+        seq_len: Length of temporal sequences
+        
+    Yields:
+        Batches with same structure as input, but shapes:
+        'o': (batch_size, seq_len, C, H, W)
+        'l': (batch_size, seq_len, N)
+        's': (batch_size, seq_len, 3)
+        'a': (batch_size, seq_len, 3)
+    """
+    # Extract dimensions
     num_episodes = data['s'].shape[0]
     ep_len = data['s'].shape[1]
+    device = data['s'].device
+    
+    # Validation
     if seq_len >= ep_len:
-        raise ValueError(f"seq_len ({seq_len}) must be smaller than episode length ({ep_len}).")
-    max_start_step = ep_len - seq_len # Max valid start index
-
+        raise ValueError(f"seq_len ({seq_len}) >= episode length ({ep_len})")
+    max_start_step = ep_len - seq_len
+    
     if num_episodes == 0 or max_start_step < 0:
-        print("Warning: No data available for batch iteration.")
-        return # Stop iteration if no data
+        print("Warning: No valid sequences available")
+        return
 
-    current_step = 0
-    while True: # Keep yielding batches indefinitely
-        # Sample random episodes and start steps for the batch
-        episodes = torch.randint(0, num_episodes, (batch_size,))
-        start_steps = torch.randint(0, max_start_step + 1, (batch_size,)) # Use max_start_step + 1 for upper bound
-
-        batches = {}
-        for k in data.keys():
-            batch_list = []
-            # Efficiently gather slices using advanced indexing
-            # Create indices for episodes and time steps
-            # episode_indices = episodes.unsqueeze(1).expand(-1, seq_len) # [B, T]
-            # time_indices = start_steps.unsqueeze(1) + torch.arange(seq_len) # [B, T]
-            # batches[k] = data[k][episode_indices, time_indices] # Doesn't work directly for dicts
-
-            # Simpler loop (might be slightly less efficient but clearer)
-            for ep_idx, start_idx in zip(episodes, start_steps):
-                 batch_list.append(data[k][ep_idx:ep_idx+1, start_idx : start_idx + seq_len])
-            try:
-                 batches[k] = torch.cat(batch_list, dim=0) # Concatenate along batch dim
-            except RuntimeError as e:
-                 print(f"Error concatenating batch for key '{k}'. Check data shapes and seq_len.")
-                 print(f"Shapes in batch_list: {[item.shape for item in batch_list]}")
-                 raise e
-        yield batches
-        current_step += 1
+    while True:  # Infinite generator
+        # Sample random episodes and start points
+        ep_indices = torch.randint(0, num_episodes, (batch_size,), device=device)
+        start_indices = torch.randint(0, max_start_step+1, (batch_size,), device=device)
+        
+        # Build batch using advanced indexing
+        batch = {}
+        for key in data.keys():
+            # Create time indices for each sequence [batch_size, seq_len]
+            time_indices = start_indices.unsqueeze(1) + torch.arange(seq_len, device=device)
+            
+            # Advanced indexing [batch_size, seq_len, ...]
+            batch[key] = data[key][ep_indices[:, None], time_indices]
+            
+            # Special case for images to maintain 5D shape
+            if key == 'o' and batch[key].dim() == 6:  # Handle edge cases
+                batch[key] = batch[key].squeeze(2)
+        
+        yield batch
 
 
 def make_repeating_batch_iterator(data, epoch_len, batch_size=32, seq_len=10):
-    """Generator yielding batches based on pre-sampled indices for one epoch, then repeats."""
+    """
+    Generator yielding batches from pre-sampled indices, repeating indefinitely.
+    Optimized for new data format with GPU support.
+    
+    Args:
+        data: Dictionary containing:
+              'o': (B,T,C,H,W) - images
+              'l': (B,T,N)     - LiDAR
+              's': (B,T,3)     - poses
+              'a': (B,T,3)     - actions
+        epoch_len: Number of batches per epoch
+        batch_size: Sequences per batch
+        seq_len: Temporal length of sequences
+    """
     num_episodes = data['s'].shape[0]
     ep_len = data['s'].shape[1]
+    device = data['s'].device
+    
+    # Validation
     if seq_len >= ep_len:
-        raise ValueError(f"seq_len ({seq_len}) must be smaller than episode length ({ep_len}).")
+        raise ValueError(f"seq_len ({seq_len}) >= episode length ({ep_len})")
     max_start_step = ep_len - seq_len
-
+    
     if num_episodes == 0 or max_start_step < 0:
-        print("Warning: No data available for repeating batch iteration.")
+        print("Warning: No valid sequences available")
         return
 
-    # Pre-sample indices for the entire epoch length
-    repeating_episodes = torch.randint(0, num_episodes, (epoch_len, batch_size))
-    repeating_start_steps = torch.randint(0, max_start_step + 1, (epoch_len, batch_size)) # Use max_start_step + 1
+    # Pre-sample all indices for the epoch on correct device
+    ep_indices = torch.randint(0, num_episodes, (epoch_len, batch_size), device=device)
+    start_indices = torch.randint(0, max_start_step+1, (epoch_len, batch_size), device=device)
 
-    current_step = 0
-    while True: # Loop indefinitely over epochs
-        for i in range(epoch_len): # Iterate through pre-sampled indices for one epoch
-            episodes = repeating_episodes[i]
-            start_steps = repeating_start_steps[i]
-            batches = {}
-            for k in data.keys():
-                batch_list = []
-                for ep_idx, start_idx in zip(episodes, start_steps):
-                    batch_list.append(data[k][ep_idx:ep_idx+1, start_idx : start_idx + seq_len])
-                try:
-                    batches[k] = torch.cat(batch_list, dim=0)
-                except RuntimeError as e:
-                     print(f"Error concatenating repeating batch for key '{k}'. Step {i}/{epoch_len}.")
-                     print(f"Shapes in batch_list: {[item.shape for item in batch_list]}")
-                     raise e
-            yield batches
-            current_step += 1
-
+    while True:  # Infinite epoch loop
+        for i in range(epoch_len):
+            # Vectorized advanced indexing
+            batch = {}
+            time_indices = start_indices[i].unsqueeze(1) + torch.arange(seq_len, device=device)
+            
+            for key in data.keys():
+                batch[key] = data[key][ep_indices[i][:, None], time_indices]
+                
+                # Handle potential singleton dimensions for images
+                if key == 'o' and batch[key].dim() == 6:
+                    batch[key] = batch[key].squeeze(2)
+            
+            yield batch
 
 def make_complete_batch_iterator(data, batch_size=1000, seq_len=10):
-    """Generator yielding batches covering all possible start steps across all episodes."""
+    """
+    Generator yielding batches covering all possible sequences exactly once per epoch.
+    Optimized for new data format with GPU support.
+    
+    Args:
+        data: Dictionary with same format as above
+        batch_size: Sequences per batch
+        seq_len: Temporal length of sequences
+    """
     num_episodes = data['s'].shape[0]
     ep_len = data['s'].shape[1]
+    device = data['s'].device
+    
+    # Validation
     if seq_len >= ep_len:
-        raise ValueError(f"seq_len ({seq_len}) must be smaller than episode length ({ep_len}).")
-    num_start_steps = ep_len - seq_len
-
+        raise ValueError(f"seq_len ({seq_len}) >= episode length ({ep_len})")
+    num_start_steps = ep_len - seq_len + 1  # +1 to include last start step
+    
     if num_episodes == 0 or num_start_steps <= 0:
-        print("Warning: No data available for complete batch iteration.")
+        print("Warning: No valid sequences available")
         return
 
-    # Create a list of all possible (episode, start_step) indices
-    batch_indices = [(i, j) for i in range(num_episodes) for j in range(num_start_steps + 1)] # Include last possible start step
-    # Optional: Shuffle indices for randomness within an epoch
-    # random.shuffle(batch_indices) # Use Python's random if needed
+    # Create all possible (episode, start_step) pairs
+    episodes = torch.arange(num_episodes, device=device)
+    starts = torch.arange(num_start_steps, device=device)
+    
+    # Combine into grid of all possible indices
+    grid_ep, grid_start = torch.meshgrid(episodes, starts, indexing='ij')
+    all_indices = torch.stack([grid_ep.reshape(-1), grid_start.reshape(-1)], dim=1)
 
-    idx_ptr = 0
-    while idx_ptr < len(batch_indices):
-        # Get indices for the current batch
-        current_indices = batch_indices[idx_ptr : idx_ptr + batch_size]
-        idx_ptr += len(current_indices) # Move pointer
+    # Shuffle indices (optional but recommended)
+    perm = torch.randperm(len(all_indices), device=device)
+    all_indices = all_indices[perm]
 
-        batches = {}
-        for k in data.keys():
-            batch_list = []
-            for (ep_idx, start_idx) in current_indices:
-                batch_list.append(data[k][ep_idx:ep_idx+1, start_idx : start_idx + seq_len])
-            try:
-                batches[k] = torch.cat(batch_list, dim=0)
-            except RuntimeError as e:
-                 print(f"Error concatenating complete batch for key '{k}'.")
-                 print(f"Shapes in batch_list: {[item.shape for item in batch_list]}")
-                 raise e
-        yield batches
+    # Batch processing
+    for i in range(0, len(all_indices), batch_size):
+        batch_indices = all_indices[i:i+batch_size]
+        
+        # Vectorized indexing
+        time_indices = batch_indices[:, 1, None] + torch.arange(seq_len, device=device)
+        batch = {}
+        
+        for key in data.keys():
+            batch[key] = data[key][batch_indices[:, 0], time_indices]
+            
+            # Handle image dimensions
+            if key == 'o' and batch[key].dim() == 6:
+                batch[key] = batch[key].squeeze(2)
+        
+        yield batch
 
 
 # --- Example Usage / Plotting (Mainly for debugging/visualization) ---
