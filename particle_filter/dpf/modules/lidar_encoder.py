@@ -32,7 +32,7 @@ class LidarEncoder(nn.Module):
         self.dropout = nn.Dropout(p=1 - dropout_keep_prob)
         
         self.fc = nn.Sequential( #fixed the missing parenthesis
-            nn.Linear(21506, 1024),
+            nn.Linear(21504, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(),
             nn.Linear(1024, 256),
@@ -57,10 +57,35 @@ class LidarEncoder(nn.Module):
         Returns:
             torch.Tensor: Encoded lidar features of shape [B, output_dim].
         """
+        
+        if x.dim() == 3 and x.size(-1) == 2:
+            x = x.permute(0, 2, 1).contiguous()
+        elif x.dim() == 4 and x.size(-1) == 2:
+            x = x.permute(0, 1, 3, 2).contiguous()
+        if x.dtype != torch.float32:
+            x = x.float()
+            
+        reshape_needed = False    
+        if x.dim() == 4:
+            # If x has 4 dimensions, we need to reshape it to 3D for Conv1d
+            reshape_needed = True # comine first two dimensions (batch and seq_len)
+            # print('reshaping x')
+            # print('x shape:', x.shape)
+            batch_size, seq_len, channels, length = x.size()
+            x = x.view(batch_size * seq_len, channels, length) 
+            # print('x reshaped shape:', x.shape)
+            
         x = self.conv(x)
         #debugging
-        print('x conv shape:', x.shape)
+        # print('x conv shape:', x.shape)
         x = self.flatten(x)
-        print('x flatten shape:', x.shape)
+        # print('x flatten shape:', x.shape)
         x = self.fc(x)
+        # print('x fc shape:', x.shape)
+        # if reshape_needed:
+        #     # If we reshaped x, we need to return it to its original shape
+        #     # Assuming we want to return to [batch_size, seq_len, output_dim]
+        #     x = x.view(batch_size, seq_len, -1)
+        #     print('x reshaped back shape:', x.shape)
+        
         return x

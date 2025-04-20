@@ -18,6 +18,9 @@ def train_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp'
     print(noisy_train_data['o'].shape)
     print(noisy_train_data['s'].shape)
     print(noisy_train_data['a'].shape)
+    print("permuting images")
+    noisy_train_data['o'] = torch.permute(noisy_train_data['o'], (0, 1, 3, 4, 2)) # [batch, seq_len, height, width, channels]
+    print(noisy_train_data['o'].shape)
 
     # train method and save result in model_path
     # The fit method now handles device detection internally.
@@ -28,7 +31,8 @@ def train_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp'
                plot=plot)
     
     # save the model
-    method.save_model("../models/full_model", device=torch.device("cpu"))
+    print("models state dict keys:", method.state_dict().keys())
+    torch.save(method.state_dict(), "../models/full_model.pth")
     print("--- Training Finished ---")
 
 
@@ -45,6 +49,11 @@ def test_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp')
     # load test data
     test_data = load_data(data_path=data_path, filename=task + '_test')
     noisy_test_data = noisyfy_data(test_data)
+    # reshape image data from [batch, seq_len, channels, height, width] to [batch, seq_len, height, width, channels]
+    print("Noisy_test_data keys:", noisy_test_data.keys())
+    print(noisy_test_data['o'].shape)
+    noisy_test_data['o'] = noisy_test_data['o'].permute(0, 1, 3, 4, 2) # [batch, seq_len, height, width, channels]
+    print(noisy_test_data['o'].shape)
     # Use seq_len from hyperparams if available, otherwise default (e.g., 50)
     hyperparams = get_default_hyperparams()
     test_seq_len = hyperparams['train'].get('seq_len', 50) # Get seq_len used in training

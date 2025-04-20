@@ -60,6 +60,7 @@ class DPF(nn.Module):
     def forward_encoder(self, o, l):
         vision = self.vision_encoder(o)
         lidar = self.lidar_encoder(l)
+        # print(f"DEBUG: vision shape: {vision.shape}, lidar shape: {lidar.shape}")
         combined = torch.cat([vision, lidar], dim=-1)
         return combined
 
@@ -327,7 +328,9 @@ class DPF(nn.Module):
             test_particles = s_batch[:, 0].unsqueeze(1).expand(B, B, -1)
             o_first = o_batch[:, 0]
             l_first = l_batch[:, 0]
-            o_first_norm = (o_first - self.means_t['o']) / (self.stds_t['o'] + 1e-8)
+            # print(f"DEBUG: o_first shape: {o_first.shape}, l_first shape: {l_first.shape}")
+            # print(f"DEBUG: means_t.shape: { self.means_t['o'].shape}")
+            o_first_norm = (o_first - self.means_t['o'].view(-1,1,1,1)) / (self.stds_t['o'].view(-1,1,1,1) + 1e-8)
             # l_first_norm = (l_first - self.means_t['l']) / (self.stds_t['l'] + 1e-8)
             encoding = self.forward_encoder(o_first_norm, l_first)
 
@@ -362,7 +365,7 @@ class DPF(nn.Module):
                 o_batch = batch['o']
                 l_batch = batch['l']
                 with torch.no_grad():
-                    o_first_norm = (o_batch[:, 0] - self.means_t['o']) / (self.stds_t['o'] + 1e-8)
+                    o_first_norm = (o_batch[:, 0] - self.means_t['o'].view(-1,1,1,1)) / (self.stds_t['o'].view(-1,1,1,1) + 1e-8)
                     l_first = l_batch[:, 0]
                     encoding = self.forward_encoder(o_first_norm, l_first)
 
