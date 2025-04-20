@@ -72,7 +72,7 @@ def load_data(trial_numbers, data_root='./data', steps_per_episode=100, concaten
     Returns:
         Dictionary with keys:
             'o': Images (B, T, C, H, W) if concatenate=False, else (B*T, C, H, W)
-            'l': LiDAR ranges (B, T, num_ranges) or (B*T, num_ranges)
+            'l': LiDAR Cartesian coordinates (B, T, 360, 2) or (B*T, 360, 2)
             's': SLAM poses (B, T, 3) or (B*T, 3)
             'a': Odometry deltas (B, T, 3) or (B*T, 3)
     """
@@ -85,9 +85,16 @@ def load_data(trial_numbers, data_root='./data', steps_per_episode=100, concaten
         # Group by timestamp (each group = one time step T)
         grouped = df.groupby('timestamp')
         for _, group in grouped:
+            # Extract raw LiDAR data
+            ranges = torch.tensor(group['range'].values, dtype=torch.float32)
+            thetas = torch.tensor(group['theta'].values, dtype=torch.float32)
+            
+            # Process LiDAR scan
+            lidar_xy = process_lidar_scan(ranges, thetas)
+            
             all_episodes.append({
                 'image_path': os.path.join(data_root, group['image_filename'].iloc[0]),
-                'lidar': torch.tensor(group['range'].values, dtype=torch.float32),  # (num_ranges,)
+                'lidar': lidar_xy,  # (360, 2)
                 'slam_pose': torch.tensor(group[['slam_x', 'slam_y', 'slam_theta']].iloc[0], dtype=torch.float32),
                 'odom_pose': torch.tensor(group[['odom_x', 'odom_y', 'odom_theta']].iloc[0], dtype=torch.float32)
             })
@@ -103,47 +110,108 @@ def load_data(trial_numbers, data_root='./data', steps_per_episode=100, concaten
     # Process each episode
     o, l, s, a = [], [], [], []
     for ep in episodes:
-        # Load images, flip vertically, and convert to tensor
+        # Load images
         ep_images = []
         for step in ep:
             img = Image.open(step['image_path']).convert('RGB')
-            img = ImageOps.flip(img)  # Flip upside-down images to correct orientation
-            img_tensor = torch.tensor(np.array(img)).permute(2, 0, 1).float() / 255.0  # (C, H, W)
+            img = ImageOps.flip(img)
+            img_tensor = torch.tensor(np.array(img)).permute(2, 0, 1).float() / 255.0
             ep_images.append(img_tensor)
         ep_images = torch.stack(ep_images)  # (T, C, H, W)
         
-        ep_lidar = [step['lidar'] for step in ep]  # List of (num_ranges,) tensors
-        ep_slam = [step['slam_pose'] for step in ep]  # (T, 3)
+        # Stack LiDAR and poses
+        ep_lidar = torch.stack([step['lidar'] for step in ep])  # (T, 360, 2)
+        ep_slam = torch.stack([step['slam_pose'] for step in ep])  # (T, 3)
         
-        # Compute odometry deltas (a[t] = odom[t+1] - odom[t])
+        # Compute odometry deltas
         ep_odom = torch.stack([step['odom_pose'] for step in ep])  # (T, 3)
         dx = ep_odom[1:, 0] - ep_odom[:-1, 0]
         dy = ep_odom[1:, 1] - ep_odom[:-1, 1]
         dtheta = wrap_angle(ep_odom[1:, 2] - ep_odom[:-1, 2])
         ep_actions = torch.stack([dx, dy, dtheta], dim=-1)  # (T-1, 3)
 
-        # Append to lists (align o[t] with s[t] and a[t])
-        o.append(ep_images[:-1])  # (T-1, C, H, W)
-        l.append(torch.stack(ep_lidar[:-1]))   # (T-1, num_ranges)
-        s.append(torch.stack(ep_slam[:-1]))    # (T-1, 3)
-        a.append(ep_actions)                  # (T-1, 3)
+        # Append to lists
+        o.append(ep_images[:-1])
+        l.append(ep_lidar[:-1])
+        s.append(ep_slam[:-1])
+        a.append(ep_actions)
 
     # Stack episodes into final tensors
     if concatenate:
         data = {
-            'o': torch.cat(o, dim=0),  # (B*T, C, H, W)
-            'l': torch.cat(l, dim=0),  # (B*T, num_ranges)
-            's': torch.cat(s, dim=0),  # (B*T, 3)
-            'a': torch.cat(a, dim=0)   # (B*T, 3)
+            'o': torch.cat(o, dim=0),
+            'l': torch.cat(l, dim=0),
+            's': torch.cat(s, dim=0),
+            'a': torch.cat(a, dim=0)
         }
     else:
         data = {
-            'o': torch.stack(o),  # (B, T-1, C, H, W)
-            'l': torch.stack(l),  # (B, T-1, num_ranges)
-            's': torch.stack(s),  # (B, T-1, 3)
-            'a': torch.stack(a)   # (B, T-1, 3)
+            'o': torch.stack(o),
+            'l': torch.stack(l),
+            's': torch.stack(s),
+            'a': torch.stack(a)
         }
     return data
+
+
+def process_lidar_scan(ranges, thetas):
+    """
+    Processes raw LiDAR data to:
+    1. Ensure 360 rays (one per degree)
+    2. Fill missing rays with neighbor averages
+    3. Convert to Cartesian coordinates (x,y)
+    
+    Args:
+        ranges: Tensor of range values
+        thetas: Tensor of angle values (radians)
+    
+    Returns:
+        Tensor of shape (360, 2) containing (x,y) coordinates
+    """
+    # Convert angles to degrees and round to nearest integer
+    degrees = torch.rad2deg(thetas).round().long() % 360
+    
+    # Create output tensor for 360 degrees
+    output_ranges = torch.full((360,), float('nan'))
+    
+    # Assign measured ranges to their degree bins
+    for deg, r in zip(degrees, ranges):
+        output_ranges[deg] = r
+    
+    # Fill missing degrees with neighbor averages
+    for deg in range(360):
+        if torch.isnan(output_ranges[deg]):
+            # Find nearest valid neighbors
+            prev_deg = (deg - 1) % 360
+            next_deg = (deg + 1) % 360
+            count = 0
+            total = 0.0
+            
+            # Look backward until we find a valid measurement
+            for i in range(1, 360):
+                check_deg = (deg - i) % 360
+                if not torch.isnan(output_ranges[check_deg]):
+                    total += output_ranges[check_deg]
+                    count += 1
+                    break
+            
+            # Look forward until we find a valid measurement
+            for i in range(1, 360):
+                check_deg = (deg + i) % 360
+                if not torch.isnan(output_ranges[check_deg]):
+                    total += output_ranges[check_deg]
+                    count += 1
+                    break
+            
+            if count > 0:
+                output_ranges[deg] = total / count
+    
+    # Convert to Cartesian coordinates
+    angles = torch.deg2rad(torch.arange(360, dtype=torch.float32))
+    x = output_ranges * torch.cos(angles)
+    y = output_ranges * torch.sin(angles)
+    
+    return torch.stack([x, y], dim=-1)  # (360, 2)
 
 
 
