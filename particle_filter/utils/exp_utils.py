@@ -21,7 +21,7 @@ def get_default_hyperparams():
             'seq_len': 5,
             'batch_size': 32,
             'epoch_length': 50,
-            'num_epochs': 10, # original 10000
+            'num_epochs': 10000, # original 10000
             'patience': 200,
             'learning_rate': 0.0003,
             'dropout_keep_ratio': 0.3,
