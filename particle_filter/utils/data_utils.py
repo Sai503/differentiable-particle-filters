@@ -62,7 +62,7 @@ def average_nn(states_from, states_to, step_sizes, num_from=10, num_to=100):
     return average_dist.item()
 
 
-def load_data(trial_numbers, data_root='./data', steps_per_episode=100, concatenate=False):
+def load_data(trial_numbers, data_root='./data', steps_per_episode=20, concatenate=False):
     """
     Args:
         trial_numbers: List of trials (e.g., [5, 6, 7]).
@@ -101,6 +101,7 @@ def load_data(trial_numbers, data_root='./data', steps_per_episode=100, concaten
 
     # Split into episodes of fixed length
     num_episodes = len(all_episodes) // steps_per_episode
+    print(f"Total episodes: {len(all_episodes)}, Steps per episode: {steps_per_episode}, Total episodes after split: {num_episodes}")
     episodes = []
     for i in range(num_episodes):
         start = i * steps_per_episode

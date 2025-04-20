@@ -346,7 +346,7 @@ class DPF(nn.Module):
             loss_incorrect = -torch.log(1.0 - incorrect_samples + 1e-16).sum() / num_incorrect if num_incorrect > 0 else torch.tensor(0.0, device=device)
             return loss_correct + loss_incorrect
 
-        params_measurement = list(self.encoder.parameters()) + list(self.measurement_model.parameters())
+        params_measurement = list(self.vision_encoder.parameters()) + list(self.lidar_encoder.parameters()) + list(self.measurement_model.parameters())
         optimizer_measurement = torch.optim.Adam(params_measurement, lr=learning_rate)
         train_stages['train_measurement_model'] = {
             'loss_fn': train_measurement_model_fn,
@@ -431,8 +431,9 @@ class DPF(nn.Module):
         # --- Set parameters ---
         self.particle_std = particle_std
         self.num_particles = num_particles
-        if hasattr(self.encoder, 'dropout'):
-            self.encoder.dropout.p = 1.0 - dropout_keep_ratio
+        if hasattr(self.vision_encoder, 'dropout'):
+            self.vision_encoder.dropout.p = 1.0 - dropout_keep_ratio
+            self.lidar_encoder.dropout.p = 1.0 - dropout_keep_ratio
         if hasattr(self.proposer, 'network'):
             for layer in self.proposer.network:
                 if isinstance(layer, nn.Dropout):

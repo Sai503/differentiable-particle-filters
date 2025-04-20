@@ -6,7 +6,7 @@ from utils.exp_utils import get_default_hyperparams
 
 def train_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp', plot=False):
     # load training data and add noise
-    train_data = load_data(trial_numbers=[5,6,7,8,9,10,11,12,13],data_root="../data")
+    train_data = load_data(trial_numbers=list(range(5,14)),data_root="../data")
     noisy_train_data = noisyfy_data(train_data)
 
     # instantiate method with hyperparameters
