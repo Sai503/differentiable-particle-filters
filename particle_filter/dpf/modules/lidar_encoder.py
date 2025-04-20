@@ -21,17 +21,17 @@ class LidarEncoder(nn.Module):
             nn.Conv1d(32, 64, kernel_size=5, stride=1),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.max_pool1d(kernel_size=2, stride=2),
+            nn.MaxPool1d(kernel_size=2, stride=2),
             nn.Conv1d(64, 256, kernel_size=5, stride=1),
             nn.BatchNorm1d(256),
-            nn.ReLU()
-            nn.max_pool1d(kernel_size=2, stride=2)
-            )
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2)
+        )
 
         self.flatten = nn.Flatten()
         self.dropout = nn.Dropout(p=1 - dropout_keep_prob)
         
-        self.fc = nn.Sequential(
+        self.fc = nn.Sequential( #fixed the missing parenthesis
             nn.Linear(21506, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(),
@@ -40,7 +40,7 @@ class LidarEncoder(nn.Module):
             nn.ReLU(),
             self.dropout,
             nn.Linear(256, output_dim)
-        )
+        ) #fixed the missing parenthesis
 
 
        
