@@ -6,12 +6,18 @@ from utils.exp_utils import get_default_hyperparams
 
 def train_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp', plot=False):
     # load training data and add noise
-    train_data = load_data(data_path=data_path, filename=task + '_train')
+    train_data = load_data(trial_numbers=[5,6,7,8,9,10,11,12,13],data_root="../data")
     noisy_train_data = noisyfy_data(train_data)
 
     # instantiate method with hyperparameters
     hyperparams = get_default_hyperparams()
     method = DPF(**hyperparams['global'])
+    
+    print(noisy_train_data.keys())
+    print(noisy_train_data['l'].shape)
+    print(noisy_train_data['o'].shape)
+    print(noisy_train_data['s'].shape)
+    print(noisy_train_data['a'].shape)
 
     # train method and save result in model_path
     # The fit method now handles device detection internally.
@@ -20,6 +26,9 @@ def train_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp'
                **hyperparams['train'],
                plot_task=task,
                plot=plot)
+    
+    # save the model
+    method.save_model("../models/full_model", device=torch.device("cpu"))
     print("--- Training Finished ---")
 
 
@@ -71,4 +80,4 @@ def test_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp')
 if __name__ == '__main__':
     # Example usage: train first, then test
     train_dpf(plot=True) # Set plot=True if you want plots during training
-    test_dpf()
+    # test_dpf()
