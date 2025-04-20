@@ -160,12 +160,12 @@ class DPF(nn.Module):
         return F.relu(x)
 
     def measurement_update(self, encoding, particles):
-        """
-        Computes the observation likelihood for each particle.
-        encoding: [B, 128] (on device)
-        particles: [B, N, 3] (on device)
-        Uses self.means_t and self.stds_t which should be tensors on the device.
-        """
+    
+        # Computes the observation likelihood for each particle.
+        # encoding: [B, 128] (on device)
+        # particles: [B, N, 3] (on device)
+        # Uses self.means_t and self.stds_t which should be tensors on the device.
+    
         if self.means_t is None or self.stds_t is None:
              raise ValueError("Statistics (means_t, stds_t) not initialized or not on device.")
 
@@ -272,12 +272,12 @@ class DPF(nn.Module):
 
 
     def motion_update(self, actions, particles, stop_sampling_gradient=False):
-        """
-        Moves particles according to actions with added learned noise.
-        actions: [B, 3] (on device)
-        particles: [B, N, 3] (on device)
-        Uses self.stds_t, self.means_t, self.state_step_sizes_t (tensors on device).
-        """
+        # """
+        # Moves particles according to actions with added learned noise.
+        # actions: [B, 3] (on device)
+        # particles: [B, N, 3] (on device)
+        # Uses self.stds_t, self.means_t, self.state_step_sizes_t (tensors on device).
+        # """
         if self.stds_t is None or self.means_t is None or self.state_step_sizes_t is None:
              raise ValueError("Statistics (stds_t, means_t, state_step_sizes_t) not initialized or not on device.")
 

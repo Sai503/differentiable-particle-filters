@@ -1,5 +1,5 @@
 import torch # Import torch to check for device
-from methods.dpf import DPF
+from dpf.dpf import DPF
 from utils.data_utils import load_data, noisyfy_data, make_batch_iterator, remove_state
 from utils.exp_utils import get_default_hyperparams
 
@@ -58,7 +58,7 @@ def test_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp')
             # remove_state might not be needed if predict handles the full batch dict
             # test_batch_input = remove_state(test_batch, provide_initial_state=False)
             # Pass the full batch, predict will handle moving to device
-            result = method.predict(test_batch, **hyperparams['test'])
+            result = method.predict(test_batch, 100)
             results.append(result)
             # You might want to process or display the result here.
             print(f"Test batch {i} prediction shape: {result.shape}")
