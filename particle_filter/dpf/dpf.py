@@ -49,6 +49,13 @@ class DPF(nn.Module):
         self.dropout_keep_prob = dropout_keep_prob
         self.proposer_keep_ratio = proposer_keep_ratio
 
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            # print(f"Testing on GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            self.device = torch.device("cpu")
+            # print("Testing on CPU.")
+
         # Initialize modules
         self.vision_encoder = VisionEncoder(dropout_keep_prob)
         self.lidar_encoder = LidarEncoder(input_channels=2, output_dim=128, dropout_keep_prob=dropout_keep_prob)
@@ -191,6 +198,39 @@ class DPF(nn.Module):
         return particle_list_stacked, particle_probs_list_stacked, encodings
 
     def predict(self, batch, num_particles, return_particles=False):
+
+        # --- Set parameters ---
+        self.particle_std = 0.2
+        self.num_particles = 100
+        if hasattr(self.vision_encoder, 'dropout'):
+            self.vision_encoder.dropout.p = 1.0 - 0.3
+            self.lidar_encoder.dropout.p = 1.0 - 0.3
+        if hasattr(self.proposer, 'network'):
+            for layer in self.proposer.network:
+                if isinstance(layer, nn.Dropout):
+                    layer.p = 1.0 - self.proposer_keep_ratio
+                    break
+
+        # --- Preprocess data and compute statistics ---
+        means, stds, state_step_sizes, state_mins, state_maxs = compute_statistics(batch)
+
+        self.means, self.stds = means, stds
+        self.state_step_sizes, self.state_mins, self.state_maxs = state_step_sizes, state_mins, state_maxs
+        self._stats_to_tensors(self.device)
+
+        # # --- Create Batch Iterators ---
+        # epoch_lengths = {'train': epoch_length, 'val': epoch_length * 2}
+        # batch_iterators = {
+        #     'train': make_repeating_batch_iterator(data_split['train'], epoch_lengths['train'], batch_size=batch_size, seq_len=seq_len),
+        #     'val': make_repeating_batch_iterator(data_split['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=seq_len),
+        #     'train1': make_repeating_batch_iterator(data_split['train'], epoch_lengths['train'], batch_size=batch_size, seq_len=2),
+        #     'val1': make_repeating_batch_iterator(data_split['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=2),
+        #     'val_ex': make_batch_iterator(data_split['val'], batch_size=batch_size, seq_len=seq_len),
+        # }
+
+        # # --- Compile Training Stages ---
+        # train_stages = self.compile_training_stages(learning_rate, plot_task)
+
         self.eval()
         if self.device is None:
             raise ValueError("Device not set. Call fit() or manually set self.device and statistics.")
@@ -625,6 +665,8 @@ class DPF(nn.Module):
         ax.set_title('Motion Model (Blue: Samples)')
         ax.legend(fontsize='small')
         show_pause(pause=0.01)
+
+        
 
     def plot_measurement_model(self, measurement_model_out_cpu):
         """Plots the measurement likelihood matrix."""

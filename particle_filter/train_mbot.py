@@ -36,56 +36,6 @@ def train_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp'
     print("--- Training Finished ---")
 
 
-def test_dpf(task='nav01', data_path='../data/100s', model_path='../models/tmp'):
-    # --- Determine Device for Testing ---
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print(f"Testing on GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        device = torch.device("cpu")
-        print("Testing on CPU.")
-    # --- End Device Setup ---
-
-    # load test data
-    test_data = load_data(data_path=data_path, filename=task + '_test')
-    noisy_test_data = noisyfy_data(test_data)
-    # reshape image data from [batch, seq_len, channels, height, width] to [batch, seq_len, height, width, channels]
-    print("Noisy_test_data keys:", noisy_test_data.keys())
-    print(noisy_test_data['o'].shape)
-    noisy_test_data['o'] = noisy_test_data['o'].permute(0, 1, 3, 4, 2) # [batch, seq_len, height, width, channels]
-    print(noisy_test_data['o'].shape)
-    # Use seq_len from hyperparams if available, otherwise default (e.g., 50)
-    hyperparams = get_default_hyperparams()
-    test_seq_len = hyperparams['train'].get('seq_len', 50) # Get seq_len used in training
-    test_batch_iterator = make_batch_iterator(noisy_test_data, seq_len=test_seq_len)
-
-    # instantiate method and load saved parameters onto the chosen device
-    method = DPF(**hyperparams['global'])
-    # --- Load model onto the determined device ---
-    method.load_model(model_path, device=device)
-    # method.eval() is called within load_model now
-
-    # run prediction on 10 test batches
-    print("--- Starting Testing ---")
-    # The predict method uses the device the model is already on
-    num_test_batches = 10
-    results = []
-    try:
-        for i in range(num_test_batches):
-            test_batch = next(test_batch_iterator)
-            # remove_state might not be needed if predict handles the full batch dict
-            # test_batch_input = remove_state(test_batch, provide_initial_state=False)
-            # Pass the full batch, predict will handle moving to device
-            result = method.predict(test_batch, 100)
-            results.append(result)
-            # You might want to process or display the result here.
-            print(f"Test batch {i} prediction shape: {result.shape}")
-    except StopIteration:
-        print(f"Warning: Only processed {len(results)} batches, test dataset smaller than {num_test_batches} batches.")
-    print("--- Testing Finished ---")
-    # You can further process 'results' here
-
-
 if __name__ == '__main__':
     # Example usage: train first, then test
     train_dpf(plot=True) # Set plot=True if you want plots during training
