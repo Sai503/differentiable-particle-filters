@@ -5,8 +5,9 @@ class MeasurementModel(nn.Module):
     def __init__(self, state_dim, min_obs_likelihood):
         super(MeasurementModel, self).__init__()
         self.min_obs_likelihood = min_obs_likelihood
+        self.encoding_dim = 256  # Assuming the encoding dimension is 128
         self.estimator = nn.Sequential(
-            nn.Linear(128 + 4, 128),
+            nn.Linear(self.encoding_dim + 4, 128),
             nn.ReLU(),
             nn.Linear(128, 128),
             nn.ReLU(),
@@ -34,8 +35,8 @@ class MeasurementModel(nn.Module):
         particle_input = torch.cat([norm_pos, cos_theta, sin_theta], dim=-1)  # [B, N, 4]
 
         # Tile encoding to match the number of particles
-        encoding_input = encoding.unsqueeze(1).expand(-1, particles.size(1), -1)  # [B, N, 128]
-        inp = torch.cat([encoding_input, particle_input], dim=-1)  # [B, N, 132]
+        encoding_input = encoding.unsqueeze(1).expand(-1, particles.size(1), -1)  # [B, N, 256]
+        inp = torch.cat([encoding_input, particle_input], dim=-1)  # [B, N, 260]
 
         # Flatten input for the estimator
         B, N, _ = inp.shape

@@ -14,6 +14,7 @@ from .modules.vision_encoder import VisionEncoder
 from .modules.motion_model import MotionModel
 from .modules.measurement_model import MeasurementModel
 from .modules.proposer import Proposer
+from .modules.lidar_encoder import LidarEncoder
 
 # Helper function to move batch data to the target device
 def move_batch_to_device(batch, device):
@@ -49,14 +50,18 @@ class DPF(nn.Module):
         self.proposer_keep_ratio = proposer_keep_ratio
 
         # Initialize modules
-        self.encoder = VisionEncoder(dropout_keep_prob)
+        self.vision_encoder = VisionEncoder(dropout_keep_prob)
+        self.lidar_encoder = LidarEncoder(input_channels=2, output_dim=128, dropout_keep_prob=dropout_keep_prob)
         self.motion_model = MotionModel(self.state_dim, learn_odom)
         self.measurement_model = MeasurementModel(self.state_dim, min_obs_likelihood)
         self.proposer = Proposer(self.state_dim, proposer_keep_ratio) if self.use_proposer else None
         self.num_particles = 100
 
-    def forward_encoder(self, o):
-        return self.encoder(o)
+    def forward_encoder(self, o, l):
+        vision = self.vision_encoder(o)
+        lidar = self.lidar_encoder(l)
+        combined = torch.cat([vision, lidar], dim=-1)
+        return combined
 
     def measurement_update(self, encoding, particles):
         return self.measurement_model(encoding, particles, self.means_t, self.stds_t)
@@ -79,6 +84,7 @@ class DPF(nn.Module):
 
     def connect_modules(self, batch):
         o_batch = batch['o']
+        l_batch = batch['l']
         a_batch = batch['a']
         s_batch = batch['s']
         device = s_batch.device
@@ -93,7 +99,7 @@ class DPF(nn.Module):
             o_flat = o_flat.float()
 
         o_flat_norm = (o_flat - self.means_t['o'].unsqueeze(0)) / (self.stds_t['o'].unsqueeze(0) + 1e-8)
-        encodings = self.forward_encoder(o_flat_norm).view(B, T, -1)
+        encodings = self.forward_encoder(o_flat_norm, l_batch ).view(B, T, -1)
 
         if self.init_with_true_state:
             initial_particles = s_batch[:, 0].unsqueeze(1).expand(B, self.num_particles, -1)
@@ -234,7 +240,7 @@ class DPF(nn.Module):
             num_obs_channels = np.asarray(self.means['o']).squeeze().shape[-1]
             if num_obs_channels <= 1:
                 num_obs_channels = np.asarray(self.means['o']).squeeze().size
-            print(f"DEBUG: Inferred num_obs_channels = {num_obs_channels}")
+            # print(f"DEBUG: Inferred num_obs_channels = {num_obs_channels}")
             if num_obs_channels not in [3, 4]:
                 print(f"Warning: Inferred num_obs_channels ({num_obs_channels}) seems unusual. Double-check data.")
         except Exception as e:
@@ -281,9 +287,9 @@ class DPF(nn.Module):
         self.state_mins_t = torch.tensor(self.state_mins, dtype=dtype, device=device)
         self.state_maxs_t = torch.tensor(self.state_maxs, dtype=dtype, device=device)
         print(f"Converted statistics to tensors on device {device}")
-        if 'o' in self.means_t: print(f"DEBUG: Final self.means_t['o'] shape: {self.means_t['o'].shape}")
-        if 'o' in self.stds_t: print(f"DEBUG: Final self.stds_t['o'] shape: {self.stds_t['o'].shape}")
-        if 'a' in self.stds_t: print(f"DEBUG: Final self.stds_t['a'] shape: {self.stds_t['a'].shape}")
+        # if 'o' in self.means_t: print(f"DEBUG: Final self.means_t['o'] shape: {self.means_t['o'].shape}")
+        # if 'o' in self.stds_t: print(f"DEBUG: Final self.stds_t['o'] shape: {self.stds_t['o'].shape}")
+        # if 'a' in self.stds_t: print(f"DEBUG: Final self.stds_t['a'] shape: {self.stds_t['a'].shape}")
 
     def compile_training_stages(self, learning_rate, plot_task):
         """
@@ -313,14 +319,17 @@ class DPF(nn.Module):
         def train_measurement_model_fn(batch):
             s_batch = batch['s']
             o_batch = batch['o']
+            l_batch = batch['l']
             B = s_batch.size(0)
             if B <= 1:
                 return torch.tensor(0.0, device=device)
 
             test_particles = s_batch[:, 0].unsqueeze(1).expand(B, B, -1)
             o_first = o_batch[:, 0]
+            l_first = l_batch[:, 0]
             o_first_norm = (o_first - self.means_t['o']) / (self.stds_t['o'] + 1e-8)
-            encoding = self.forward_encoder(o_first_norm)
+            # l_first_norm = (l_first - self.means_t['l']) / (self.stds_t['l'] + 1e-8)
+            encoding = self.forward_encoder(o_first_norm, l_first)
 
             encoding_expanded = encoding.unsqueeze(1).expand(B, B, -1)
             encoding_flat = encoding_expanded.reshape(B * B, -1)
@@ -351,9 +360,11 @@ class DPF(nn.Module):
             def train_particle_proposer_fn(batch):
                 s_batch = batch['s']
                 o_batch = batch['o']
+                l_batch = batch['l']
                 with torch.no_grad():
                     o_first_norm = (o_batch[:, 0] - self.means_t['o']) / (self.stds_t['o'] + 1e-8)
-                    encoding = self.forward_encoder(o_first_norm)
+                    l_first = l_batch[:, 0]
+                    encoding = self.forward_encoder(o_first_norm, l_first)
 
                 proposed_particles = self.propose_particles(encoding, self.num_particles)
                 sq_distance = compute_sq_distance(proposed_particles, s_batch[:, 0:1].expand(-1, self.num_particles, -1), self.state_step_sizes_t)

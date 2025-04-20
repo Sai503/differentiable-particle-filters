@@ -4,8 +4,9 @@ import torch.nn as nn
 class Proposer(nn.Module):
     def __init__(self, state_dim, proposer_keep_ratio):
         super(Proposer, self).__init__()
+        self.encoding_dim = 256  # Assuming the encoding dimension is 256
         self.network = nn.Sequential(
-            nn.Linear(128, 128),
+            nn.Linear(self.encoding_dim, 128),
             nn.ReLU(),
             nn.Dropout(p=1 - proposer_keep_ratio),
             nn.Linear(128, 128),
@@ -40,10 +41,10 @@ class Proposer(nn.Module):
             return torch.empty((B, num_particles, self.state_dim), dtype=dtype, device=device)
 
         # Duplicate encoding for each particle
-        encoding_dup = encoding.unsqueeze(1).expand(-1, num_particles, -1)  # [B, num_particles, 128]
+        encoding_dup = encoding.unsqueeze(1).expand(-1, num_particles, -1)  # [B, num_particles, 256]
 
         # Apply proposer network
-        inp_flat = encoding_dup.reshape(B * num_particles, -1)  # [B * num_particles, 128]
+        inp_flat = encoding_dup.reshape(B * num_particles, -1)  # [B * num_particles, 256]
         proposed_raw = self.network(inp_flat).view(B, num_particles, 4)  # [B, num_particles, 4]
 
         # Transform the outputs to valid state values
