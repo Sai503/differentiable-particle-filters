@@ -115,6 +115,7 @@ def load_data(trial_numbers, data_root='./data', steps_per_episode=100, concaten
         for step in ep:
             img = Image.open(step['image_path']).convert('RGB')
             img = ImageOps.flip(img)
+            img = img.resize((64, 64), Image.LANCZOS) # actual algorithm behind antialising
             img_tensor = torch.tensor(np.array(img)).permute(2, 0, 1).float() / 255.0
             ep_images.append(img_tensor)
         ep_images = torch.stack(ep_images)  # (T, C, H, W)
