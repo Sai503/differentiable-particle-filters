@@ -4,6 +4,9 @@ data/
 models/*
 /original_data/*
 original_data/
+/models/
+data1/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

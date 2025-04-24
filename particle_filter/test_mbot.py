@@ -24,7 +24,7 @@ def test_dpf():
 
 
     # load test data
-    test_data = load_data(trial_numbers=[5,6,7,8],data_root="../data")
+    test_data = load_data(trial_numbers=[5,6,7,8],data_root="../data1")
     noisy_test_data = noisyfy_data(test_data)
     # reshape image data from [batch, seq_len, channels, height, width] to [batch, seq_len, height, width, channels]
     noisy_test_data['o'] = torch.permute(noisy_test_data['o'], (0, 1, 3, 4, 2)) # [batch, seq_len, height, width, channels]
@@ -37,7 +37,7 @@ def test_dpf():
 
     # instantiate method and load saved parameters onto the chosen device
     # model path
-    model_path = "../models/full_model.pth"
+    model_path = "../models_trained/full_model.pth"
     # load model
     method = DPF(**hyperparams['global'])
     # load state dict

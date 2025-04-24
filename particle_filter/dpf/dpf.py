@@ -282,8 +282,8 @@ class DPF(nn.Module):
             if num_obs_channels <= 1:
                 num_obs_channels = np.asarray(self.means['o']).squeeze().size
             # print(f"DEBUG: Inferred num_obs_channels = {num_obs_channels}")
-            if num_obs_channels not in [3, 4]:
-                print(f"Warning: Inferred num_obs_channels ({num_obs_channels}) seems unusual. Double-check data.")
+            # if num_obs_channels not in [3, 4]:
+            #     print(f"Warning: Inferred num_obs_channels ({num_obs_channels}) seems unusual. Double-check data.")
         except Exception as e:
             print(f"Warning: Could not infer num_obs_channels from self.means['o']. Defaulting to 4. Error: {e}")
             num_obs_channels = 4
@@ -368,8 +368,8 @@ class DPF(nn.Module):
             test_particles = s_batch[:, 0].unsqueeze(1).expand(B, B, -1)
             o_first = o_batch[:, 0]
             l_first = l_batch[:, 0]
-            # print(f"DEBUG: o_first shape: {o_first.shape}, l_first shape: {l_first.shape}")
-            # print(f"DEBUG: means_t.shape: { self.means_t['o'].shape}")
+            print(f"DEBUG: o_first shape: {o_first.shape}, l_first shape: {l_first.shape}")
+            print(f"DEBUG: means_t.shape: { self.means_t['o'].shape}, {self.stds_t['o'].shape}, {self.means['o'].shape}")
             o_first_norm = (o_first - self.means_t['o'].view(-1,1,1,1)) / (self.stds_t['o'].view(-1,1,1,1) + 1e-8)
             # l_first_norm = (l_first - self.means_t['l']) / (self.stds_t['l'] + 1e-8)
             encoding = self.forward_encoder(o_first_norm, l_first)

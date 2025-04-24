@@ -16,12 +16,12 @@ path = [
     [0.0, 0.0, -1.57]
 ]
 #this is a line I have added
-my_robot.drive_path(path)
+# my_robot.drive_path(path)
 
 # Ensure directories exist
-os.makedirs("images5", exist_ok=True)
+os.makedirs("images1", exist_ok=True)
 
-with open("maze-data-5.csv", mode="w", newline="") as file:
+with open("maze-data-1.csv", mode="w", newline="") as file:
     writer = csv.writer(file)
     writer.writerow([
         "timestamp", "range", "theta", 
