@@ -62,7 +62,7 @@ class DPF(nn.Module):
         self.motion_model = MotionModel(self.state_dim, learn_odom)
         self.measurement_model = MeasurementModel(self.state_dim, min_obs_likelihood)
         self.proposer = Proposer(self.state_dim, proposer_keep_ratio) if self.use_proposer else None
-        self.num_particles = 10
+        self.num_particles = 100
 
     def forward_encoder(self, o, l):
         vision = self.vision_encoder(o)
@@ -201,7 +201,7 @@ class DPF(nn.Module):
 
         # --- Set parameters ---
         self.particle_std = 0.2
-        self.num_particles = 10
+        self.num_particles = num_particles
         if hasattr(self.vision_encoder, 'dropout'):
             self.vision_encoder.dropout.p = 1.0 - 0.3
             self.lidar_encoder.dropout.p = 1.0 - 0.3
@@ -235,7 +235,7 @@ class DPF(nn.Module):
         if self.device is None:
             raise ValueError("Device not set. Call fit() or manually set self.device and statistics.")
         if self.num_particles is None or self.num_particles != num_particles:
-            self.num_particles = 10
+            self.num_particles = 100
 
         batch_device = move_batch_to_device(batch, self.device)
 
@@ -473,7 +473,7 @@ class DPF(nn.Module):
 
         # --- Set parameters ---
         self.particle_std = particle_std
-        self.num_particles = 10
+        self.num_particles = num_particles
         if hasattr(self.vision_encoder, 'dropout'):
             self.vision_encoder.dropout.p = 1.0 - dropout_keep_ratio
             self.lidar_encoder.dropout.p = 1.0 - dropout_keep_ratio

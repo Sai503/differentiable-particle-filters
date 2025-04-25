@@ -25,7 +25,7 @@ def get_default_hyperparams():
             'patience': 200,
             'learning_rate': 0.0003,
             'dropout_keep_ratio': 0.3,
-            'num_particles': 100,
+            'num_particles': 1000,
             'particle_std': 0.2,
         },
         'test' : {
