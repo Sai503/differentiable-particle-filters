@@ -68,6 +68,12 @@ def test_dpf():
             # test_batch_input = remove_state(test_batch, provide_initial_state=False)
             # Pass the full batch, predict will handle moving to device
             num_steps += (test_batch['o'].shape[0]  * test_batch['o'].shape[1])
+
+            # print test batch shapes for o, l, a, s
+            print(f"Test batch {i} o shape: {test_batch['o'].shape}")
+            print(f"Test batch {i} l shape: {test_batch['l'].shape}")
+            print(f"Test batch {i} a shape: {test_batch['a'].shape}")
+            print(f"Test batch {i} s shape: {test_batch['s'].shape}")
             result = method.predict(test_batch, 100)
             results.append(result)
             # You might want to process or display the result here.
@@ -76,16 +82,16 @@ def test_dpf():
             # calculate error
             # Assuming result and test_batch have the same shape
             error = torch.abs(result - test_batch['s'])
-            print(f"Test batch {i} result shape: {result.shape}")
-            print(f"Test batch {i} s shape: {test_batch['o'].shape}")
-            print(f"Test batch {i} error shape: {error.shape}")
-            print(f"Test batch {i} error mean: {error.mean().item()}")
-            # print first 5 errors
-            print(f"Test batch {i} error first 5: {error.flatten()[:5]}")
-            # print first 5 predictions
-            print(f"Test batch {i} prediction first 5: {result.flatten()[:5]}")
-            # print first 5 ground truth
-            print(f"Test batch {i} ground truth first 5: {test_batch['s'].flatten()[:5]}")
+            # print(f"Test batch {i} result shape: {result.shape}")
+            # print(f"Test batch {i} s shape: {test_batch['o'].shape}")
+            # print(f"Test batch {i} error shape: {error.shape}")
+            # print(f"Test batch {i} error mean: {error.mean().item()}")
+            # # print first 5 errors
+            # print(f"Test batch {i} error first 5: {error.flatten()[:5]}")
+            # # print first 5 predictions
+            # print(f"Test batch {i} prediction first 5: {result.flatten()[:5]}")
+            # # print first 5 ground truth
+            # print(f"Test batch {i} ground truth first 5: {test_batch['s'].flatten()[:5]}")
 
     except StopIteration:
         print(f"Warning: Only processed {len(results)} batches, test dataset smaller than {num_test_batches} batches.")

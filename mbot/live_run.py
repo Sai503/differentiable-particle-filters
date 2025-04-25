@@ -14,6 +14,8 @@ output_file = "test_log.csv"
 output_log = []
 prev_pose = [0, 0, 0]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+particle_list = None
+particle_probs = None
 
 def setup():
     picam2 = Picamera2()
@@ -48,32 +50,42 @@ def main_loop(picam2, my_robot, model):
     delta_odom = [odom_pose[0] - prev_pose[0], odom_pose[1] - prev_pose[1], odom_pose[2] - prev_pose[2]]
     # update previous pose
     prev_pose = odom_pose.copy()
-    # create batch
+    # create batch + add 2 extra dimensions in front of all tensors
+    img_tensor = img_tensor.unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, 3, 32, 32]
+    lidar_tensor = lidar_tensor.unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, 360, 2]
+    delta_odom = torch.tensor(delta_odom).unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, 3]
+    slam_pose = torch.tensor(slam_pose).unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, 3]
     batch = {
-        "o": img_tensor.unsqueeze(0).to(device),
-        "l": lidar_tensor.unsqueeze(0).to(device),
-        "a": torch.tensor(delta_odom).unsqueeze(0).to(device),
-        "s": torch.tensor(slam_pose).unsqueeze(0).to(device)
+        "o": img_tensor,
+        "l": lidar_tensor,
+        "a": delta_odom,
+        "s": slam_pose
     }
     # run the model
-    pred = model.predict(batch, 100)
+    pred = None
+    global particle_list, particle_probs
+    if particle_list is None or particle_probs is None:
+        # first run, initialize particles
+        pred, particle_list, particle_probs = model.predict(batch, 100, return_particles=True)
+    else:
+        pred, particle_list, particle_probs = model.predict(batch, 100, return_particles=True, reuse_initial_particles=True, initial_particles=particle_list, initial_particle_probs=particle_probs)
     # get the predicted pose
-    pred_pose = pred[0].cpu()
+    pred_pose = pred[0,0,:].cpu()
     # log data
     log_update = {
         "timestamp": time.time(),
         "odom_pose_x": odom_pose[0],
         "odom_pose_y": odom_pose[1],
         "odom_pose_theta": odom_pose[2],
-        "slam_pose_x": slam_pose[0],
-        "slam_pose_y": slam_pose[1],
-        "slam_pose_theta": slam_pose[2],
-        "pred_pose_x": pred_pose[0].item(),
-        "pred_pose_y": pred_pose[1].item(),
-        "pred_pose_theta": pred_pose[2].item(),
-        "odom_delta_x": delta_odom[0],
-        "odom_delta_y": delta_odom[1],
-        "odom_delta_theta": delta_odom[2],
+        "slam_pose_x": slam_pose[0,0,0],
+        "slam_pose_y": slam_pose[0,0,1],
+        "slam_pose_theta": slam_pose[0,0,2],
+        "pred_pose_x": pred_pose[0],
+        "pred_pose_y": pred_pose[1],
+        "pred_pose_theta": pred_pose[2],
+        "odom_delta_x": delta_odom[0,0,0],
+        "odom_delta_y": delta_odom[0,0,1],
+        "odom_delta_theta": delta_odom[0,0,2],
     }
     output_log.append(log_update)
     end_time = time.time()

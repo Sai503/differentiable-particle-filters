@@ -90,7 +90,10 @@ class DPF(nn.Module):
         mean_orientation = torch.atan2(sin_sum, cos_sum)
         return torch.cat([mean_position, mean_orientation], dim=-1)
 
-    def connect_modules(self, batch):
+    def connect_modules(self, batch, initial_particles_override=None, initial_particle_probs_override=None):
+        """
+        Connects the modules for a batch. Optionally re-uses old particles and probabilities if initial_particles_override and initial_particle_probs_override are provided.
+        """
         o_batch = batch['o']
         l_batch = batch['l']
         a_batch = batch['a']
@@ -109,7 +112,10 @@ class DPF(nn.Module):
         o_flat_norm = (o_flat - self.means_t['o'].unsqueeze(0)) / (self.stds_t['o'].unsqueeze(0) + 1e-8)
         encodings = self.forward_encoder(o_flat_norm, l_batch ).view(B, T, -1)
 
-        if self.init_with_true_state:
+        # --- Allow re-use of old particles and probabilities if provided ---
+        if initial_particles_override is not None:
+            initial_particles = initial_particles_override
+        elif self.init_with_true_state:
             initial_particles = s_batch[:, 0].unsqueeze(1).expand(B, self.num_particles, -1)
         else:
             if self.use_proposer:
@@ -123,7 +129,10 @@ class DPF(nn.Module):
                     parts.append(rand_tensor * (state_maxs[d] - state_mins[d]) + state_mins[d])
                 initial_particles = torch.cat(parts, dim=-1)
 
-        initial_particle_probs = torch.ones(B, self.num_particles, device=device, dtype=dtype) / self.num_particles
+        if initial_particle_probs_override is not None:
+            initial_particle_probs = initial_particle_probs_override
+        else:
+            initial_particle_probs = torch.ones(B, self.num_particles, device=device, dtype=dtype) / self.num_particles
 
         particle_list = [initial_particles]
         particle_probs_list = [initial_particle_probs]
@@ -197,8 +206,7 @@ class DPF(nn.Module):
 
         return particle_list_stacked, particle_probs_list_stacked, encodings
 
-    def predict(self, batch, num_particles, return_particles=False):
-
+    def predict(self, batch, num_particles, return_particles=False, reuse_initial_particles=False, initial_particles=None, initial_particle_probs=None):
         # --- Set parameters ---
         self.particle_std = 0.2
         self.num_particles = num_particles
@@ -218,19 +226,6 @@ class DPF(nn.Module):
         self.state_step_sizes, self.state_mins, self.state_maxs = state_step_sizes, state_mins, state_maxs
         self._stats_to_tensors(self.device)
 
-        # # --- Create Batch Iterators ---
-        # epoch_lengths = {'train': epoch_length, 'val': epoch_length * 2}
-        # batch_iterators = {
-        #     'train': make_repeating_batch_iterator(data_split['train'], epoch_lengths['train'], batch_size=batch_size, seq_len=seq_len),
-        #     'val': make_repeating_batch_iterator(data_split['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=seq_len),
-        #     'train1': make_repeating_batch_iterator(data_split['train'], epoch_lengths['train'], batch_size=batch_size, seq_len=2),
-        #     'val1': make_repeating_batch_iterator(data_split['val'], epoch_lengths['val'], batch_size=batch_size, seq_len=2),
-        #     'val_ex': make_batch_iterator(data_split['val'], batch_size=batch_size, seq_len=seq_len),
-        # }
-
-        # # --- Compile Training Stages ---
-        # train_stages = self.compile_training_stages(learning_rate, plot_task)
-
         self.eval()
         if self.device is None:
             raise ValueError("Device not set. Call fit() or manually set self.device and statistics.")
@@ -240,7 +235,14 @@ class DPF(nn.Module):
         batch_device = move_batch_to_device(batch, self.device)
 
         with torch.no_grad():
-            particle_list, particle_probs_list, _ = self.connect_modules(batch_device)
+            if reuse_initial_particles:
+                particle_list, particle_probs_list, _ = self.connect_modules(
+                    batch_device,
+                    initial_particles_override=initial_particles,
+                    initial_particle_probs_override=initial_particle_probs
+                )
+            else:
+                particle_list, particle_probs_list, _ = self.connect_modules(batch_device)
             pred_states = self.pred_states
 
         if return_particles:
