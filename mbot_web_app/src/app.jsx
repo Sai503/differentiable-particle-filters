@@ -291,6 +291,7 @@ function MBotSceneWrapper({ mbot, scene, connected, slamMode, robotDisplay, lase
           metersPerCell: data.meters_per_cell,
           origin: data.origin
         };
+        console.log("Map data:", headerData);
 
         if (scene.current.loaded) {
           scene.current.setMapHeaderData(data.width, data.height, data.meters_per_cell, data.origin);
