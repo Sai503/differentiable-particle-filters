@@ -44,20 +44,23 @@ class Proposer(nn.Module):
         encoding_dup = encoding.unsqueeze(1).expand(-1, num_particles, -1)  # [B, num_particles, 256]
 
         # Apply proposer network
+        print(f"proposing {num_particles} particles for {B} batches")
         inp_flat = encoding_dup.reshape(B * num_particles, -1)  # [B * num_particles, 256]
         proposed_raw = self.network(inp_flat).view(B, num_particles, 4)  # [B, num_particles, 4]
-
+        print(f"proposed_raw shape: {proposed_raw.shape}")
         # Transform the outputs to valid state values
         range_x = state_maxs_t[0] - state_mins_t[0]
         mid_x = (state_maxs_t[0] + state_mins_t[0]) / 2.0
         part0 = proposed_raw[:, :, 0:1] * (range_x / 2.0) + mid_x
+        print(f"part0 shape: {part0.shape}")
 
         range_y = state_maxs_t[1] - state_mins_t[1]
         mid_y = (state_maxs_t[1] + state_mins_t[1]) / 2.0
         part1 = proposed_raw[:, :, 1:2] * (range_y / 2.0) + mid_y
+        print(f"part1 shape: {part1.shape}")
 
         part2 = torch.atan2(proposed_raw[:, :, 2:3], proposed_raw[:, :, 3:4])  # Compute angle (theta)
-
+        print(f"part2 shape: {part2.shape}")
         # Concatenate results
         proposed_particles = torch.cat([part0, part1, part2], dim=-1)  # [B, num_particles, state_dim]
 

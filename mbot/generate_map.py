@@ -5,7 +5,7 @@ from PIL import Image
 import math
 
 csv_file = "test_log.csv"
-map_file = "map.csv"
+map_file = "current_map.map"
 
 output_file = "final.png"
 pixel_colors = {
@@ -23,6 +23,7 @@ def coordinate_to_pixel(x, y):
 
 def main():
     # open map file
+    global origin_x, origin_y, cells_x, cells_y, meters_per_cell
     with open(map_file, mode="r") as file:
         # read first line
         header = file.readline().strip().split(" ")
@@ -49,12 +50,12 @@ def main():
             # iterate over rows in csv file
             for row in reader:
                 # get odom, slam, and pred poses
-                odom_x = float(row["odom_x"])
-                odom_y = float(row["odom_y"])
-                slam_x = float(row["slam_x"])
-                slam_y = float(row["slam_y"])
-                pred_x = float(row["pred_x"])
-                pred_y = float(row["pred_y"])
+                odom_x = float(row["odom_pose_x"])
+                odom_y = float(row["odom_pose_y"])
+                slam_x = float(row["slam_pose_x"])
+                slam_y = float(row["slam_pose_y"])
+                pred_x = float(row["pred_pose_x"])
+                pred_y = float(row["pred_pose_y"])
 
                 # convert to pixel coordinates
                 odom_pixel_x, odom_pixel_y = coordinate_to_pixel(odom_x, odom_y)

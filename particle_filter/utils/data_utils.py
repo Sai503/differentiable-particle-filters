@@ -12,7 +12,7 @@ from PIL import Image, ImageOps
 # For file I/O we still use numpy; alternatively you could switch to torch.save/load.
 import numpy as np
 
-from utils.plotting_utils import plot_trajectories, plot_maze, plot_observations, plot_trajectory
+from particle_filter.utils.plotting_utils import plot_trajectories, plot_maze, plot_observations, plot_trajectory
 
 # Use torch.remainder to mimic modulo for tensors.
 def wrap_angle(angle):

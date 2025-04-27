@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from utils.data_utils import wrap_angle
+from particle_filter.utils.data_utils import wrap_angle
 
 class MotionModel(nn.Module):
     def __init__(self, state_dim, learn_odom):

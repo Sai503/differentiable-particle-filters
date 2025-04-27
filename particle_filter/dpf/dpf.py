@@ -6,9 +6,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-from utils.data_utils import wrap_angle, compute_statistics, split_data, make_batch_iterator, make_repeating_batch_iterator
-from utils.method_utils import atan2, compute_sq_distance
-from utils.plotting_utils import plot_maze, show_pause
+from particle_filter.utils.data_utils import wrap_angle, compute_statistics, split_data, make_batch_iterator, make_repeating_batch_iterator
+from particle_filter.utils.method_utils import atan2, compute_sq_distance
+from particle_filter.utils.plotting_utils import plot_maze, show_pause
 
 from .modules.vision_encoder import VisionEncoder
 from .modules.motion_model import MotionModel
@@ -48,6 +48,7 @@ class DPF(nn.Module):
         self.state_dim = 3
         self.dropout_keep_prob = dropout_keep_prob
         self.proposer_keep_ratio = proposer_keep_ratio
+        self.proposed_first = None
 
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
@@ -79,7 +80,14 @@ class DPF(nn.Module):
 
     def propose_particles(self, encoding, num_particles):
         if self.proposer:
-            return self.proposer(encoding, num_particles, self.state_mins_t, self.state_maxs_t)
+            prop = self.proposer(encoding, num_particles, self.state_mins_t, self.state_maxs_t)
+            if self.proposed_first is None:
+                # set it to average of theta
+                self.proposed_first = prop[:,:, 2].mean()
+                print(f"DEBUG: proposed_first: {self.proposed_first}")
+            # subtract proposed_first from theta
+            prop[:,:, 2] = wrap_angle(prop[:,:, 2] - self.proposed_first)
+            return prop
         else:
             raise RuntimeError("Proposer is not initialized.")
 
@@ -104,12 +112,15 @@ class DPF(nn.Module):
         B, T = o_batch.shape[0], o_batch.shape[1]
 
         o_flat = o_batch.reshape(B * T, *o_batch.shape[2:])
-        if o_flat.dim() == 4 and o_flat.size(-1) == 3:
-            o_flat = o_flat.permute(0, 3, 1, 2).contiguous()
+        # print(f"DEBUG: o_flat shape: {o_flat.shape}")
+        # print(f"debug: {self.means_t['o'].shape}: {self.stds_t['o'].shape}, {self.means['o'].shape}")
+        
+        if o_flat.dim() == 4 and o_flat.size(-1) != 3:
+            o_flat = o_flat.permute(0, 2,3,1).contiguous()
         if o_flat.dtype != torch.float32:
             o_flat = o_flat.float()
-
         o_flat_norm = (o_flat - self.means_t['o'].unsqueeze(0)) / (self.stds_t['o'].unsqueeze(0) + 1e-8)
+       
         encodings = self.forward_encoder(o_flat_norm, l_batch ).view(B, T, -1)
 
         # --- Allow re-use of old particles and probabilities if provided ---
