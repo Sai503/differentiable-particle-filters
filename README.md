@@ -8,6 +8,9 @@ To do this we made the following changes
 2. Write a script to collect a dataset from the mbot including slam pose, odom pose, camera images, and lidar scans.
 3. Modify the model to create a Lidar Embedding in addition to a Camera Embedding and concatinate the two for use in subsequent stages
 
+## Report
+Our report is available here: [FinalReport.pdf](/FinalReport.pdf)
+
 ## Demo
 We drove the mbot in the Maze pictured below:
 ![Original Maze](/images/Maze.jpeg "Original Maze")
